@@ -33,41 +33,44 @@
 #endif
 
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
-#define MSM_FB_PRIM_BUF_SIZE (960 * ALIGN(540, 32) * 4 * 3) /* 4 bpp x 3 pages */
+#define MSM_FB_PRIM_BUF_SIZE \
+		(roundup((960 * 540 * 4), 4096) * 3) /* 4 bpp x 3 pages */
 #else
-#define MSM_FB_PRIM_BUF_SIZE (960 * ALIGN(540, 32) * 4 * 2) /* 4 bpp x 2 pages */
+#define MSM_FB_PRIM_BUF_SIZE \
+		(roundup((960 * 540 * 4), 4096) * 2) /* 4 bpp x 2 pages */
 #endif
 
 #ifdef CONFIG_FB_MSM_HDMI_MSM_PANEL
-#define MSM_FB_EXT_BUF_SIZE  (1920 * 1080 * 2 * 1) /* 2 bpp x 1 page */
+#define MSM_FB_EXT_BUF_SIZE  \
+		(roundup((1920 * 1080 * 2), 4096) * 1) /* 2 bpp x 1 page */
 #else
-#define MSM_FB_EXT_BUFT_SIZE	0
+#define MSM_FB_EXT_BUF_SIZE	0
 #endif
 
 #ifdef CONFIG_FB_MSM_OVERLAY_WRITEBACK
 /* width x height x 3 bpp x 2 frame buffer */
-#define MSM_FB_WRITEBACK_SIZE roundup(960 * ALIGN(540, 32) * 3 * 2, 4096)
+#define MSM_FB_WRITEBACK_SIZE roundup((960 * 540 * 3 * 2), 4096)
 #define MSM_FB_WRITEBACK_OFFSET 0
 #else
-#define MSM_FB_WRITEBACK_SIZE	0
+#define MSM_FB_WRITEBACK_SIZE   0
 #define MSM_FB_WRITEBACK_OFFSET 0
 #endif
 
 /* Note: must be multiple of 4096 */
 #define MSM_FB_SIZE roundup(MSM_FB_PRIM_BUF_SIZE + MSM_FB_EXT_BUF_SIZE, 4096)
 
-#define MSM_PMEM_MDP_SIZE	0x2000000
-#define MSM_PMEM_ADSP_SIZE	0x23AC000
+#define MSM_PMEM_MDP_SIZE	0x3A00000
+#define MSM_PMEM_ADSP_SIZE	0x1CB0000
 #define MSM_PMEM_ADSP2_SIZE	0x654000 /* 1152 * 1920 * 1.5 * 2 */
 #define MSM_PMEM_AUDIO_SIZE	0x239000
 #define MSM_PMEM_KERNEL_EBI1_SIZE	0xC7000
 
 #define MSM_FB_WRITEBACK_BASE	(0x45C00000)
 #define MSM_PMEM_AUDIO_BASE	(0x46400000)
-#define MSM_PMEM_ADSP_BASE	(0x40400000)
+#define MSM_PMEM_ADSP_BASE	(0x6D600000)
 #define MSM_PMEM_ADSP2_BASE	(MSM_PMEM_ADSP_BASE + MSM_PMEM_ADSP_SIZE)
-#define MSM_FB_BASE		(0x70000000 - MSM_FB_SIZE)
-#define MSM_PMEM_MDP_BASE	(0x6D600000)
+#define MSM_FB_BASE		(0x70300000 - MSM_FB_SIZE)
+#define MSM_PMEM_MDP_BASE	(0x40400000)
 #define MSM_PMEM_KERNEL_EBI1_BASE	(MSM_PMEM_AUDIO_BASE + MSM_PMEM_AUDIO_SIZE)
 
 #define MSM_SMI_BASE          0x38000000
@@ -136,9 +139,11 @@
 #define PYRAMID_GPIO_BT_RESET_N        (142)
 
 /* USB */
+#define PYRAMID_GPIO_MHL_WAKE_UP        (62)
 #define PYRAMID_GPIO_USB_ID        (63)
 #define PYRAMID_GPIO_MHL_RESET        (70)
 #define PYRAMID_GPIO_MHL_INT        (71)
+#define PYRAMID_GPIO_MHL_USB_EN         (139)
 #define PYRAMID_GPIO_MHL_USB_SWITCH        (99)
 
 /* Camera */

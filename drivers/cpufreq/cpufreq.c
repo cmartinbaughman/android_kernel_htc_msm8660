@@ -28,7 +28,6 @@
 #include <linux/cpu.h>
 #include <linux/completion.h>
 #include <linux/mutex.h>
-#include <linux/sched.h>
 #include <mach/perflock.h>
 #include <linux/syscore_ops.h>
 
@@ -591,17 +590,23 @@ static ssize_t show_bios_limit(struct cpufreq_policy *policy, char *buf)
 }
 
 #ifdef CONFIG_CPU_VOLTAGE_TABLE
+
 extern ssize_t acpuclk_get_vdd_levels_str(char *buf);
 extern void acpuclk_set_vdd(unsigned acpu_khz, int vdd);
+
 static ssize_t show_vdd_levels(struct kobject *a, struct attribute *b, char *buf) {
 	return acpuclk_get_vdd_levels_str(buf);
 }
+
 static ssize_t store_vdd_levels(struct kobject *a, struct attribute *b, const char *buf, size_t count) {
+
 	int i = 0, j;
 	int pair[2] = { 0, 0 };
 	int sign = 0;
+
 	if (count < 1)
 		return 0;
+
 	if (buf[0] == '-') {
 		sign = -1;
 		i++;
@@ -610,8 +615,11 @@ static ssize_t store_vdd_levels(struct kobject *a, struct attribute *b, const ch
 		sign = 1;
 		i++;
 	}
+
 	for (j = 0; i < count; i++) {
+	
 		char c = buf[i];
+		
 		if ((c >= '0') && (c <= '9')) {
 			pair[j] *= 10;
 			pair[j] += (c - '0');
@@ -619,6 +627,7 @@ static ssize_t store_vdd_levels(struct kobject *a, struct attribute *b, const ch
 		else if ((c == ' ') || (c == '\t')) {
 			if (pair[j] != 0) {
 				j++;
+
 				if ((sign != 0) || (j > 1))
 					break;
 			}
@@ -626,6 +635,7 @@ static ssize_t store_vdd_levels(struct kobject *a, struct attribute *b, const ch
 		else
 			break;
 	}
+
 	if (sign != 0) {
 		if (pair[0] > 0)
 			acpuclk_set_vdd(0, sign * pair[0]);
@@ -638,6 +648,7 @@ static ssize_t store_vdd_levels(struct kobject *a, struct attribute *b, const ch
 	}
 	return count;
 }
+
 #endif	/* CONFIG_CPU_VOLTAGE_TABLE */
 
 cpufreq_freq_attr_ro_perm(cpuinfo_cur_freq, 0400);
@@ -1067,6 +1078,7 @@ static int cpufreq_add_dev(struct sys_device *sys_dev)
 	policy->user_policy.max = policy->max;
 
 	if (found) {
+		/* Calling the driver can overwrite policy frequencies again */
 		policy->min = cp->min;
 		policy->max = cp->max;
 		policy->user_policy.min = cp->user_policy.min;
@@ -2020,10 +2032,7 @@ EXPORT_SYMBOL_GPL(cpufreq_unregister_driver);
 
 static int __init cpufreq_core_init(void)
 {
-	int cpu;
-#ifdef CONFIG_CPU_VOLTAGE_TABLE
-	int rc;
-#endif	/* CONFIG_CPU_VOLTAGE_TABLE */
+	int cpu, rc;
 
 	for_each_possible_cpu(cpu) {
 		per_cpu(cpufreq_policy_cpu, cpu) = -1;

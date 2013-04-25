@@ -58,8 +58,7 @@ static int override_cpu;
  */
 
 /* to be safe, fill vars with defaults */
-uint32_t cmdline_maxkhz = 1188000, cmdline_minkhz = 192000;
-
+uint32_t cmdline_maxkhz = 1566000, cmdline_minkhz = 192000;
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE
 char cmdline_gov[16] = "performance";
 #endif
@@ -75,8 +74,17 @@ char cmdline_gov[16] = "ondemand";
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 char cmdline_gov[16] = "conservative";
 #endif
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_LAGFREE
+char cmdline_gov[16] = "lagfree";
+#endif
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVE
 char cmdline_gov[16] = "interactive";
+#endif
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_LAZY
+char cmdline_gov[16] = "lazy";
+#endif
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_BADASS
+char cmdline_gov[16] = "badass";
 #endif
 
 uint32_t cmdline_maxscroff = 486000;
@@ -249,7 +257,7 @@ static void msm_cpufreq_early_suspend(struct early_suspend *h)
 			if (curfreq > cmdline_maxscroff) {
 				acpuclk_set_rate(cpu, cmdline_maxscroff, SETRATE_CPUFREQ);
 				curfreq = acpuclk_get_rate(cpu);
-				printk(KERN_INFO "[SCREEN_OFF]: Limited freq to '%u'\n", curfreq);
+				printk(KERN_INFO "[cmdline_maxscroff]: Limited freq to '%u'\n", curfreq);
 			}
 		}
 		mutex_unlock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
@@ -271,7 +279,7 @@ static void msm_cpufreq_late_resume(struct early_suspend *h)
 			if (curfreq != cpu_work->frequency) {
 				acpuclk_set_rate(cpu, cpu_work->frequency, SETRATE_CPUFREQ);
 				curfreq = acpuclk_get_rate(cpu);
-				printk(KERN_INFO "[SCREEN_ON]: Unlocking freq to '%u'\n", curfreq);
+				printk(KERN_INFO "[cmdline_maxscroff]: Unlocking freq to '%u'\n", curfreq);
 			}
 		}
 		mutex_unlock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
@@ -377,6 +385,8 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 		return -ENODEV;
 
 	table = cpufreq_frequency_get_table(policy->cpu);
+	if (table == NULL)
+		return -ENODEV;
 	if (cpufreq_frequency_table_cpuinfo(policy, table)) {
 #ifdef CONFIG_CMDLINE_OPTIONS
 		if ((cmdline_maxkhz) && (cmdline_minkhz)) {
