@@ -12,11 +12,11 @@ MAKE="4"
 ## Set compiler location to compile with linaro cortex a8
 echo Setting compiler location...
 export ARCH=arm
-export CROSS_COMPILE=$HOME/android/system/prebuilt/linux-x86/toolchain/linaro/bin/arm-cortex_a8-linux-gnueabi-
+export CROSS_COMPILE=/mnt/pac/prebuilt/linux-x86/toolchain/cmb-linaro-4.7.3/bin/arm-cortex_a8-linux-gnueabi-
 
 ## Build kernel using pyramid_defconfig
 make mrproper
-make pyramid_defconfig
+make shooter_defconfig
 make -j$MAKE ARCH=arm
 sleep 1
 
