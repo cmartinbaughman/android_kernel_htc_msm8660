@@ -1,0 +1,4044 @@
+[33mcommit c6b03a1b5e152042e121727769818274c5102c3e[m
+Author: tbalden <illespal@gmail.com>
+Date:   Sun Jun 16 17:11:17 2013 +0200
+
+    merge in latest updates from johnnyslts repo
+
+[33mcommit 9df9851ec6502f2e5120d96921346f1a734894d8[m
+Author: mrg666 <drgungor@hotmail.com>
+Date:   Tue Jun 11 18:52:21 2013 -0400
+
+    ARM: 7668/1: fix memset-related crashes caused by recent GCC (4.7.2) optimizations Recent GCC versions (e.g. GCC-4.7.2) perform optimizations based on assumptions about the implementation of memset and similar functions. The current ARM optimized memset code does not return the value of its first argument, as is usually expected from standard implementations.
+    
+    For instance in the following function:
+    
+    void debug_mutex_lock_common(struct mutex *lock, struct mutex_waiter *waiter)
+    {
+    	memset(waiter, MUTEX_DEBUG_INIT, sizeof(*waiter));
+    	waiter->magic = waiter;
+    	INIT_LIST_HEAD(&waiter->list);
+    }
+    
+    compiled as:
+    
+    800554d0 <debug_mutex_lock_common>:
+    800554d0:       e92d4008        push    {r3, lr}
+    800554d4:       e1a00001        mov     r0, r1
+    800554d8:       e3a02010        mov     r2, #16 ; 0x10
+    800554dc:       e3a01011        mov     r1, #17 ; 0x11
+    800554e0:       eb04426e        bl      80165ea0 <memset>
+    800554e4:       e1a03000        mov     r3, r0
+    800554e8:       e583000c        str     r0, [r3, #12]
+    800554ec:       e5830000        str     r0, [r3]
+    800554f0:       e5830004        str     r0, [r3, #4]
+    800554f4:       e8bd8008        pop     {r3, pc}
+    
+    GCC assumes memset returns the value of pointer 'waiter' in register r0; causing
+    register/memory corruptions.
+    
+    This patch fixes the return value of the assembly version of memset.
+    It adds a 'mov' instruction and merges an additional load+store into
+    existing load/store instructions.
+    For ease of review, here is a breakdown of the patch into 4 simple steps:
+    
+    Step 1
+    ======
+    Perform the following substitutions:
+    ip -> r8, then
+    r0 -> ip,
+    and insert 'mov ip, r0' as the first statement of the function.
+    At this point, we have a memset() implementation returning the proper result,
+    but corrupting r8 on some paths (the ones that were using ip).
+    
+    Step 2
+    ======
+    Make sure r8 is saved and restored when (! CALGN(1)+0) == 1:
+    
+    save r8:
+    -       str     lr, [sp, #-4]!
+    +       stmfd   sp!, {r8, lr}
+    
+    and restore r8 on both exit paths:
+    -       ldmeqfd sp!, {pc}               @ Now <64 bytes to go.
+    +       ldmeqfd sp!, {r8, pc}           @ Now <64 bytes to go.
+    (...)
+            tst     r2, #16
+            stmneia ip!, {r1, r3, r8, lr}
+    -       ldr     lr, [sp], #4
+    +       ldmfd   sp!, {r8, lr}
+    
+    Step 3
+    ======
+    Make sure r8 is saved and restored when (! CALGN(1)+0) == 0:
+    
+    save r8:
+    -       stmfd   sp!, {r4-r7, lr}
+    +       stmfd   sp!, {r4-r8, lr}
+    
+    and restore r8 on both exit paths:
+            bgt     3b
+    -       ldmeqfd sp!, {r4-r7, pc}
+    +       ldmeqfd sp!, {r4-r8, pc}
+    (...)
+            tst     r2, #16
+            stmneia ip!, {r4-r7}
+    -       ldmfd   sp!, {r4-r7, lr}
+    +       ldmfd   sp!, {r4-r8, lr}
+    
+    Step 4
+    ======
+    Rewrite register list "r4-r7, r8" as "r4-r8".
+    
+    Signed-off-by: Ivan Djelic <ivan.djelic@parrot.com>
+    Reviewed-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Dirk Behme <dirk.behme@gmail.com>
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+    ___________________
+    
+    ARM: 7670/1: fix the memset fix
+    Commit 455bd4c430b0 ("ARM: 7668/1: fix memset-related crashes caused by
+    recent GCC (4.7.2) optimizations") attempted to fix a compliance issue
+    with the memset return value.  However the memset itself became broken
+    by that patch for misaligned pointers.
+    
+    This fixes the above by branching over the entry code from the
+    misaligned fixup code to avoid reloading the original pointer.
+    
+    Also, because the function entry alignment is wrong in the Thumb mode
+    compilation, that fixup code is moved to the end.
+    
+    While at it, the entry instructions are slightly reworked to help dual
+    issue pipelines.
+    
+    Signed-off-by: Nicolas Pitre <nico@linaro.org>
+    Tested-by: Alexander Holler <holler@ahsoftware.de>
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+[33mcommit bec8d2e37d22072557be7a41633ee2e8384aa749[m
+Author: Minsung Kim <ms925.kim@samsung.com>
+Date:   Tue Apr 23 13:32:01 2013 +0000
+
+    cpufreq: interactive: avoid underflow on active time calculation
+    
+    Check for idle time delta less than elapsed time delta, avoid
+    underflow computing active time.
+    
+    Change-Id: I3e4c6ef1ad794eec49ed379c0c50fa727fd6ad28
+    Signed-off-by: Minsung Kim <ms925.kim@samsung.com>
+
+[33mcommit 7461b50e467a2ec51d91eccaa646397c8e585afe[m
+Author: Todd Poynor <toddpoynor@google.com>
+Date:   Fri Apr 5 20:25:21 2013 +0000
+
+    cpufreq: interactive: reduce chance of zero time delta on load eval
+    
+    Reschedule load sampling timer after timestamp of sample start taken,
+    hold spinlock across entire sequence to avoid preemption.  Avoid the
+    WARN for zero time delta in the load sampling timer function.
+    
+    Change-Id: Idc10a756f09141decb6df92669521a1ebf0dbc10
+    Signed-off-by: Todd Poynor <toddpoynor@google.com>
+
+[33mcommit cf4db81eb29281ad1fa3aa8011d028ac3b3c4399[m
+Author: Todd Poynor <toddpoynor@google.com>
+Date:   Mon Apr 22 23:44:58 2013 +0000
+
+    interactive merge
+
+[33mcommit fcbe53f2f45b99411778a44279f2b64f17557fb9[m
+Author: sultanxda <sultanxda@gmail.com>
+Date:   Fri Jun 14 21:10:14 2013 -0700
+
+    Linux 3.0.82
+    
+    Signed-off-by: sultanxda <sultanxda@gmail.com>
+
+[33mcommit 67bfca6d5da9f09bcc342184962a55f78c901da2[m
+Author: Matt Wagantall <mattw@codeaurora.org>
+Date:   Wed Feb 8 22:09:11 2012 +0000
+
+    msm: pil: Allow pil_put() to shutdown peripherals
+    
+    Remove the temporary hack to prevent peripherals from shutting down
+    when pil_put() is called and the reference count goes to 0.
+    
+    Signed-off-by: Matt Wagantall <mattw@codeaurora.org>
+    (cherry picked from commit 39f90cbfbe87eb4195c0206f7db617723025fdb9)
+    
+    Change-Id: Iaba64a03e3ae4793fa801c691a83a685b4c4d03c
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+
+[33mcommit 5147efca4a2b1f89631d7132199e1a191875f874[m
+Author: Mahesh Sivasubramanian <msivasub@codeaurora.org>
+Date:   Fri Jan 20 20:49:47 2012 +0000
+
+    msm: spm: Do not set the core voltage during driver initilization
+    
+    The initial voltage value for the cores are setup by bootloaders for
+    Core 0. The voltages for the secondary cores are set by Core 0 before
+    bringing them out of reset. When the cores are out of reset, the SAW
+    regulator takes care of setting core voltage. Thereby we need not set
+    the voltage for the cores during SPM driver initialization.
+    
+    Additionally the commit also reorders the SPM register enums to prevent
+    initiliazation of status registers.
+    
+    CRs-fixed: 336256
+    (cherry picked from commit d740fabec659e29ef056faaffa324bfda2c6c97e)
+    
+    Conflicts:
+    
+    	arch/arm/mach-msm/board-8064.c
+    
+    Change-Id: I641c4c2a8e358298d416f778345fb632052b424a
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+    Signed-off-by: Stephen Boyd <sboyd@codeaurora.org>
+    Signed-off-by: Sudhir Sharma <sudsha@codeaurora.org>
+
+[33mcommit f3b3848549a3f108920e128fa4fd2d432311f1f9[m
+Author: Praveen Chidambaram <pchidamb@codeaurora.org>
+Date:   Sun Jan 8 17:03:28 2012 +0000
+
+    msm: spm: Add API to turn cpu rail on.
+    
+    Bootloaders will not turn on secondary cores and enable only the primary
+    core. The kernel would be needed to turn on all secondary cores through
+    SPM. The API will abstract turning on a core rail from boot_secondary().
+    
+    CRs-fixed: 329019
+    Change-Id: I294ad8a441c3721e39f7c719fa9559fa196f4083
+    Signed-off-by: Praveen Chidambaram <pchidamb@codeaurora.org>
+
+[33mcommit 661383dd809e1b20d9ecdad9bec0d7441aacf75f[m
+Author: Benoit Goby <benoit@android.com>
+Date:   Tue May 29 13:57:27 2012 -0700
+
+    usb: gadget: android: Fix product name
+    
+    Product names may contain spaces and scanf %s only matches the 1st word.
+    Use strlcpy instead.
+    
+    Change-Id: Ie8703fea9775f7fc17fe615a42597ca3816d36b0
+    Signed-off-by: Benoit Goby <benoit@android.com>
+
+[33mcommit c3c36d68095a4425a1987d95f5c522c77650d765[m
+Author: Scott Anderson <saa@google.com>
+Date:   Wed Jan 18 15:56:51 2012 -0800
+
+    usb: gadget: android: Honor CONFIG_USB_GADGET_VBUS_DRAW
+    
+    The maximum current draw was hard coded to 500 mA.  composite.c
+    has code that uses CONFIG_USB_GADGET_VBUS_DRAW to set the
+    bMaxPower and to set whether or not the device is self-powered if
+    they haven't been set.  This change removes the code in android.c
+    to allow composite.c to set them.
+    
+    Change-Id: I9db37922e91ee86e9e5c0e14519e119e5c41ca48
+    Signed-off-by: Scott Anderson <saa@google.com>
+
+[33mcommit 3a892fa41e021f7397ac71423ff4ad6721f413a0[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Mon Apr 2 15:46:24 2012 -0700
+
+    switch: add timestamps to switch driver
+    
+    Change-Id: Iac5b5279f45fcc6e506d801cb5e9d6d2f6f6f9fa
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit 3b316707d7dbf4d3d17b84b2a29f1b2b95068b21[m
+Author: Pratibhasagar V <pratibha@codeaurora.org>
+Date:   Wed Aug 22 12:17:45 2012 +0530
+
+    mmc: msm_sdcc: vote for msm bus bandwidth
+    
+    If there is no voting for the system fabric clock, it may run at the
+    minimum clock speed. If system fabric is running at lower speed (than
+    what is needed by SDCC workload), SDCC read & write throughput numbers may be
+    degraded.
+    
+    This patch adds the msm bus voting for bandwidth required by SDCC driver
+    based on card clock speed and bus width.
+    
+    Adapted to shooter_u by Johnnyslt
+    
+    CRs-Fixed: 355327
+    Change-Id: I7fbcbe22beb09408f8460f815a6f7d34105e21cb
+    Signed-off-by: Pratibhasagar V <pratibha@codeaurora.org>
+    Signed-off-by: Darescu Ionut <johnny@esi.ro>
+
+[33mcommit c96b648ce3e747392a331274b642bb1dc28b6eb0[m
+Author: Oluwafemi Adeyemi <aadeyemi@codeaurora.org>
+Date:   Wed Mar 7 14:47:36 2012 -0800
+
+    mmc: msm_sdcc: Power down slots after reboot
+    
+    Some reboot methods (eg. adb reboot) may not power
+    down SDCC slots. This can result in cards being
+    in unexpected states after reboot. Explicitly reset
+    slot voltage regulator on reboot.
+    
+    CRs-Fixed: 341840
+    Change-Id: I8cdb52bc58e34900378af468794760653f3babad
+    Signed-off-by: Oluwafemi Adeyemi <aadeyemi@codeaurora.org>
+
+[33mcommit 6a87cc9e2f26b5286675c1dfe293930c5db05875[m
+Author: Kuirong Wang <kuirongw@codeaurora.org>
+Date:   Wed Feb 29 16:09:09 2012 -0800
+
+    ASoC: core: Fix the suspend/resume failure
+    
+    The suspend/resume schedule work fails because of the
+    uninsantiated sound card. The fix is to skip the
+    schedule work for the uninsantiated sound card.
+    
+    CRs-fixed: 339411
+    Signed-off-by: Kuirong Wang <kuirongw@codeaurora.org>
+    (cherry picked from commit 5ab054fb0655bb0ab6820a18e931fabf69053ea9)
+    
+    Change-Id: Icf303ffef9d7019c936510dc676ba83eeec84f1c
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+
+[33mcommit 49f501255f643181d8600f1a8b458ff308ba6947[m
+Author: Ben Romberger <bromberg@codeaurora.org>
+Date:   Thu Sep 22 13:51:35 2011 -0700
+
+    ASoc: msm: Add support for multiple inputs to kcontrol
+    
+    Adds the macro SOC_SINGLE_MULTI_EXT which allows the user
+    to pass the number of integer inputs accepted by the control.
+    
+    Change-Id: I75009672568d1e0979ecd577031e72bd87f310d2
+    Signed-off-by: Ben Romberger <bromberg@codeaurora.org>
+
+[33mcommit eb7ceeb2218920301fcd7ca77e8752a52b4bda92[m
+Author: Amar Singhal <asinghal@codeaurora.org>
+Date:   Thu Feb 23 14:43:58 2012 -0800
+
+    framebuffer: add a pollable sysfs entry for display status
+    
+    Wakeup the userspace poll on change of display status. The
+    userspace then may take action to change the
+    power/performance characteristics of the device.
+    
+    Change-Id: I9bd11f3d895d3d83230104f5d8dcd1deeaa754cd
+    Signed-off-by: Amar Singhal <asinghal@codeaurora.org>
+
+[33mcommit 58a744c889ac7c29a344f15bbddcd9b3d8cd21ef[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Thu Jun 13 17:39:20 2013 +0000
+
+    enable shooter sw_sync thanks for idea johnnyslt
+
+[33mcommit 93d110ea865346695ea129d1659b3cbb5fd2fec6[m
+Author: Vikram Mulukutla <markivx@codeaurora.org>
+Date:   Fri Dec 2 15:12:53 2011 -0800
+
+    msm: subsystem_restart: Explicitly log the restart level.
+    
+    To allow one to determine what the restart level
+    was at the time of the invocation of a restart
+    sequence, explicitly log the level in the kernel
+    log.
+    
+    While we're here, mention the name of the subsystem
+    that has crashed before panic'ing.
+    
+    Signed-off-by: Vikram Mulukutla <markivx@codeaurora.org>
+
+[33mcommit 9a9c92a9977564f77f35a977293ba13987ac2dca[m
+Author: karthik karuppasamy <kkaruppa@codeaurora.org>
+Date:   Tue Jun 19 15:03:10 2012 -0700
+
+    more conflicts resolved
+
+[33mcommit a2ac3cce44a52cb2c8fbe026d9b381a58a45f0bd[m
+Author: Riaz Rahaman <riazr@codeaurora.org>
+Date:   Tue Feb 21 10:48:01 2012 -0800
+
+    msm: clock-8x60: Add IOMMU clock aliases for the video driver
+    
+    The video driver needs control of some IOMMU clocks for secure video
+    playback. Add the necessary aliases to the clk_lookup table.
+    
+    (cherry picked from commit 966922b3dc1649163c699e9b10da236341420aaf)
+    
+    Change-Id: Ibdaf3d1f05aa0dd3e1feb0a5f2a07892b0eba586
+    Signed-off-by: Riaz Ur Rahaman <riazr@codeaurora.org>
+
+[33mcommit 73855d52de64f44863437b14c09d8b12b8811572[m
+Author: Lucille Sylvester <lsylvest@codeaurora.org>
+Date:   Wed Sep 7 13:55:24 2011 -0600
+
+    msm: idle_stats: Reset all idle stats events
+    
+    Reset all the idle stats events once the information is communicated
+    to userspace. If this is not done, userspace keeps receiving stale
+    busy timer expiry events.
+    
+    CRs-fixed: 334781
+    Signed-off-by: Lucille Sylvester <lsylvest@codeaurora.org>
+    (cherry picked from commit 586c84fa558e7820cd9283aafbced13798f664f2)
+    
+    Change-Id: Ia4cd09a5419625ffb9d9716b722739b50b8cc2c5
+    Signed-off-by: Srivalli Oguri <oguri@codeaurora.org>
+
+[33mcommit ea99af3ce492580bfe6d1f19c48847929a82377a[m
+Author: Lynus Vaz <lvaz@codeaurora.org>
+Date:   Mon Nov 14 16:31:24 2011 +0530
+
+    msm: idle_stats: Detect serialized use cases.
+    
+    Check for 80% CPU busy within the GPU idle time, to improve performance
+    of serialized use cases.
+    
+    CRs-fixed: 334781
+    Signed-off-by: Lynus Vaz <lvaz@codeaurora.org>
+    (cherry picked from commit 61c7719e7993a8bfa58e83294d0f6e23b7d413a1)
+    
+    Change-Id: Ic1221adc2ad900f4e2520eec29fe9b69ff797c59
+    Signed-off-by: Srivalli Oguri <oguri@codeaurora.org>
+
+[33mcommit 093e66c0e89c5c7837f3cef1bab525c3ab4698d4[m
+Author: Karthikeyan Ramasubramanian <kramasub@codeaurora.org>
+Date:   Wed Apr 18 17:16:49 2012 -0600
+
+    msm: smd: Fix race condition while processing SMSM callback
+    
+    When SMSM interrupt is received, a snapshot of SMSM callback is stored
+    in a kfifo. The snapshot is stored as
+    	a) SMSM state of each subsystem
+    	b) Wakelock usage information.
+    
+    Then a work item is scheduled in global workqueue to process the snapshot
+    and notify the smsm clients. The smsm snapshot is processed as
+    	1) Lock the snapshot
+    	2) Retrieve SMSM states from kfifo and process them
+    	3) Unlock the snapshot
+    	4) Retrieve Wakelock usage information from kfifo
+    
+    When back-to-back smsm interrupts are received, multiple work items are
+    scheduled in multiple cores. The first work item performs steps 1, 2 &
+    3 and got pre-empted. In the meanwhile the second work item starts
+    with Wakelock usage information and reports wrong smsm state to the SMSM
+    clients.
+    
+    So schedule the work items in a single thread workqueue and interchange
+    steps 3 & 4 while processing the SMSM snapshot.
+    
+    CRs-Fixed: 353552
+    Change-Id: Ic08e242653cc8d1648ad7a70bf7c5f6b7c089c4e
+    Signed-off-by: Karthikeyan Ramasubramanian <kramasub@codeaurora.org>
+    (cherry picked from commit 3249a223df201088289d113b80c70b9d23dea847)
+    (cherry picked from commit 492417630c5e4e42c09b7fe36c53dc9882a4ce4b)
+    
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+
+[33mcommit 1b974fd211ab7045faf990e6b8517959f6f535ea[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Tue Apr 3 19:10:46 2012 -0600
+
+    msm: smsm: Fix race condition in SMSM notification
+    
+    The SMSM snapshot logic takes a snapshot of the current SMSM state,
+    places it into a FIFO, increments a wakelock count, and then signals a
+    worker to process the state changes.  The worker processes the state
+    changes and then decrements the wakelock count.
+    
+    In the previous case, the code would do the following:
+    
+    Interrupt handler:
+     1) insert data into FIFO
+     2) increment wakelock count
+    
+    Worker:
+     a) verifies >= 1 snapshots are in FIFO
+     b) processes snapshot
+     c) decrements wakelock reference count
+    
+    If the interrupt handler is interrupted between steps 1 and 2, then the
+    function flow would be 1abc2.  In this case, step c would fail because
+    the wakelock count would be zero and the wakelock would remain at 1 and
+    locked even though the FIFO would be empty.  This results in the
+    wakelock not getting released.
+    
+    To resolve this, the order of 2 (now 1') and 1 (now 2') was swapped
+    which always ensures 1' will always occur before abc which results in
+    the proper ordering 1'2'abc.
+    
+    CRS-Fixed: 349099
+    Change-Id: I388b4c2f76838f59337e94f83b65fa06e81bb875
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+    (cherry picked from commit 96b55f6ec25d5812a0492fc39b6b44a6141795d2)
+    (cherry picked from commit 8c17b69afa7f2b7eb10df635f984b15d08c71da5)
+    
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+
+[33mcommit 6fbbe7ea6ea196d3c1f15613fac4709acb398b4c[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Wed Mar 28 14:01:02 2012 -0600
+
+    msm: smd: Do not use wakelock for local DEM notifications
+    
+    Notify local SMSM callback clients without using a wakelock since SMSM
+    signaling is used by power management during power-down/-up sequencing
+    on DEM-based targets.  Grabbing a wakelock in this case will abort
+    power-down sequencing.
+    
+    (cherry picked from commit da31d046ba0c5d3d1f674e9d35a39e9d0e4ae4df)
+    
+    Change-Id: I1f7e3a3ae049573baaf8866efd79ad324a248f61
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+    (cherry picked from commit 2240228f3be50b8a0ebd60d5f36cf6314f156404)
+    (cherry picked from commit 32c89ee88b9e1f020ba075d3688afb4d99033799)
+    
+    Signed-off-by: Zhoulu Luo <zluo@codeaurora.org>
+
+[33mcommit 408ca6fcb0e024c395dfd0f3c322ab72b0c86901[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Mon Jan 30 12:39:22 2012 -0700
+
+    msm: smd: Remove duplicate variable definitions
+    
+    Remove duplicate local variable definitions that cause
+    variable aliasing and could result in accessing a null
+    pointer when dealing with open-close-open race
+    condition.
+    
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+    (cherry picked from commit 724f317cf6176d0a48a994d0f98a4fb73019e3ce)
+    
+    Change-Id: Ia891810ab42aa214a12fc7be7a09ed34dfdef387
+    Signed-off-by: Sudhir Sharma <sudsha@codeaurora.org>
+
+[33mcommit d7d2b815a2fdcb444d30fa43710bae46022bd12d[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Mon Mar 19 10:04:22 2012 -0600
+
+    msm: smsm: Add SMSM notifier wakelock
+    
+    Add wakelock that is locked in the SMSM interrupt handler and unlocked
+    in the workqueue after notifications have been completed.
+    
+    This prevents the sleep code from putting the system to sleep before the
+    SMSM notification workqueue gets scheduled.
+    
+    Change-Id: I45c4bc210d638ebccfecef883bb62abfbf9f2a1b
+    CRs-Fixed: 345581
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+
+[33mcommit 07bad2d54b5b160122db030efdc14ecbaad7da91[m
+Author: Sudhir Sharma <sudsha@codeaurora.org>
+Date:   Sat Mar 24 16:38:00 2012 -0700
+
+    msm: smsm: Add SMSM notifier wakelock.
+    
+    CRs-Fixed : 345581
+    
+    Signed-off-by: Sudhir Sharma <sudsha@codeaurora.org>
+    (cherry picked from commit ff461d9d828499fec86b269cc65a3cfed8c5aaac)
+    
+    Change-Id: I24845f52271fa98c36ec026bbf182240e965270a
+    Signed-off-by: Sudhir Sharma <sudsha@codeaurora.org>
+
+[33mcommit da9a98c166da3f58a5c914e5061dab4a21560823[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Wed Oct 12 16:41:37 2011 -0600
+
+    msm: smd: add separate return code if SMD port is closing
+    
+    Add EAGAIN return code if SMD port has been allocated, but
+    is currently pending a remote close.  This allows the client
+    to differentiate between ENODEV (port doesn't exist)
+    and EAGAIN (port not ready to be opened).
+    
+    (cherry picked from commit bb2b1faf7d0fd51457e6fc452eef6c52f2023c64)
+    
+    Change-Id: I1b057c0e3cc36b87f2d724325304ec941fcdb536
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+
+[33mcommit a518cd12d5a5544614e13371c972781d44d199ae[m
+Author: Eric Holmberg <eholmber@codeaurora.org>
+Date:   Wed Dec 28 11:49:21 2011 -0700
+
+    msm: smd: Add SMSM state queue
+    
+    To reduce the chance of missing SMSM state transitions,
+    push the SMSM state into a queue in the interrupt handler
+    and then pull the state for processing the in callback
+    workqueue.
+    
+    Change-Id: Ib66bc15f7445369ea7ad2ca271a79ac10b8105a0
+    CRs-Fixed: 323725
+    Signed-off-by: Eric Holmberg <eholmber@codeaurora.org>
+
+[33mcommit 3fa3877a0c1f0d2a788751370b6456558ba9d56e[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Sat May 25 10:43:21 2013 +0300
+
+    sched: disable gentle fair sleepers
+
+[33mcommit 44b1c2cb3fa1152db24a663346785a4343cb54d2[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Fri May 24 21:46:23 2013 +0300
+
+    rwsem: steal writing sem for better performance
+    Commit 5a50508 changes to rwsem from mutex, caused aim7 fork_test
+    performance to dropped 50%. Yuanhan liu did an analysis, found it was
+    caused by strict sequential writing. Ingo suggest stealing sem writing from
+    front task in wait queue. https://lkml.org/lkml/2013/1/29/84
+    
+    So does this patch.
+    In this patch, I just allow write stealing to happen when the first waiter
+    is also writer. The performance fully is now fully recovered.
+    
+    Reported-by: lkp@linux.intel.com
+    Cc: Ingo Molnar <mingo@kernel.org>
+    Signed-off-by: Alex Shi <alex.shi@intel.com>
+
+[33mcommit 56b67077e008c9ba299ddf9f2af1b80f87858ce8[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Fri May 24 21:45:12 2013 +0300
+
+    resolving conflict with Johnnyslts dynamicreadahead.
+
+[33mcommit ee73f3fff81fde72504474e64603adde4e02ce32[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Fri May 24 21:29:48 2013 +0300
+
+    Added optimized ARM RWSEM algorithm
+    
+    Author:    Ezekeel <Ezekeel@gmail.com>
+
+[33mcommit 0bd69ff0f3b3c2e8bd7e6c38b6fc27543a074f82[m
+Author: faux123 <reioux@gmail.com>
+Date:   Wed Apr 3 08:47:40 2013 +0800
+
+    tmpfs: fix mempolicy object leaks This patch fixes several mempolicy leaks in the tmpfs mount logic. These leaks are slow - on the order of one object leaked per mount attempt.
+    
+    Leak 1 (umount doesn't free mpol allocated in mount):
+        while true; do
+            mount -t tmpfs -o mpol=interleave,size=100M nodev /mnt
+            umount /mnt
+        done
+    
+    Leak 2 (errors parsing remount options will leak mpol):
+        mount -t tmpfs -o size=100M nodev /mnt
+        while true; do
+            mount -o remount,mpol=interleave,size=x /mnt 2> /dev/null
+        done
+        umount /mnt
+    
+    Leak 3 (multiple mpol per mount leak mpol):
+        while true; do
+            mount -t tmpfs -o mpol=interleave,mpol=interleave,size=100M nodev /mnt
+            umount /mnt
+        done
+    
+    This patch fixes all of the above.  I could have broken the patch into
+    three pieces but is seemed easier to review as one.
+    
+    Signed-off-by: Greg Thelen <gthelen@google.com>
+    modified for Mako kernel from LKML reference
+    
+    Signed-off-by: faux123 <reioux@gmail.com>
+
+[33mcommit 901207d595911900d54b5547c6e5517bc2fa563a[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Fri May 24 20:43:23 2013 +0300
+
+    lib/string: use glibc version
+
+[33mcommit 1972f55210168c7aedbd07bf4dad0ebc8c689e33[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Fri May 24 19:42:38 2013 +0300
+
+    lowmemorykiller: make default lowmemorykiller debug message useful
+    
+    lowmemorykiller debug messages are inscrutable and mostly useful
+    for debugging the lowmemorykiller, not explaining why a process
+    was killed.  Make the messages more useful by prefixing them
+    with "lowmemorykiller: " and explaining in more readable terms
+    what was killed, who it was killed for, and why it was killed.
+    
+    The messages now look like:
+    [   76.997631] lowmemorykiller: Killing 'droid.gallery3d' (2172), adj 1000,
+    [   76.997635]    to free 27436kB on behalf of 'kswapd0' (29) because
+    [   76.997638]    cache 122624kB is below limit 122880kB for oom_score_adj 1000
+    [   76.997641]    Free memory is -53356kB above reserved
+    
+    A negative number for free memory above reserved means some of the
+    reserved memory has been used and is being regenerated by kswapd,
+    which is likely what called the shrinkers.
+    
+    Change-Id: I1fe983381e73e124b90aa5d91cb66e55eaca390f
+    Signed-off-by: Colin Cross <ccross@android.com>
+
+[33mcommit cc0257c95316802aa118be07764b940337a51550[m
+Author: mrg666 <drgungor@hotmail.com>
+Date:   Sun Apr 28 08:19:36 2013 -0400
+
+    backport lowmemorykiller from Google android kernel 3.4
+
+[33mcommit c09edb5a3694d97355a9508d4401b5f1530f3c5e[m
+Author: Sujit Reddy Thumma <sthumma@codeaurora.org>
+Date:   Tue Apr 9 19:18:47 2013 +0800
+
+    mmc: core: Fix possbile memory leak Fix possible memory leak detected by kmemleak:
+    
+    unreferenced object 0xc0f80f00 (size 64):
+      comm "swapper/0", pid 1, jiffies 4294937508 (age 82.980s)
+      hex dump (first 32 bytes):
+        6d 6d 63 30 5f 64 65 74 65 63 74 00 72 79 2e 68  mmc0_detect.ry.h
+        00 07 00 00 68 77 63 61 70 2e 68 00 02 00 00 70  ....hwcap.h....p
+      backtrace:
+        [<c010a1fc>] __kmalloc+0x164/0x220
+        [<c01e1630>] kvasprintf+0x38/0x58
+        [<c01e1668>] kasprintf+0x18/0x24
+        [<c02fcf60>] mmc_alloc_host+0x114/0x1b4
+        [<c0311c84>] msmsdcc_probe+0xc14/0x1fd8
+        [<c022b40c>] platform_drv_probe+0x14/0x18
+        [<c022a144>] driver_probe_device+0x144/0x334
+        [<c022a394>] __driver_attach+0x60/0x84
+        [<c022884c>] bus_for_each_dev+0x4c/0x78
+        [<c0229720>] bus_add_driver+0xd0/0x250
+        [<c022a884>] driver_register+0x9c/0x128
+        [<c00086bc>] do_one_initcall+0x90/0x160
+        [<c06d1904>] kernel_init+0xe8/0x1a4
+        [<c000ee4c>] kernel_thread_exit+0x0/0x8
+        [<ffffffff>] 0xffffffff
+    
+    Change-Id: I3b29d71463af849a072cabbe56637adf6db6d0da
+    Signed-off-by: Sujit Reddy Thumma <sthumma@codeaurora.org>
+
+[33mcommit 593c58c79394dfdb3e17c639d7e17979bdcf1136[m
+Author: Dave Martin <dave.martin@linaro.org>
+Date:   Thu Nov 22 13:02:00 2012 +0100
+
+    ARM: decompressor: Enable unaligned memory access for v6 and above
+    
+    Modern GCC can generate code which makes use of the CPU's native
+    unaligned memory access capabilities.  This is useful for the C
+    decompressor implementations used for unpacking compressed kernels.
+    
+    This patch disables alignment faults and enables the v6 unaligned
+    access model on CPUs which support these features (i.e., v6 and
+    later), allowing full unaligned access support for C code in the
+    decompressor.
+    
+    The decompressor C code must not be built to assume that unaligned
+    access works if support for v5 or older platforms is included in
+    the kernel.
+    
+    For correct code generation, C decompressor code must always use
+    the get_unaligned and put_unaligned accessors when dealing with
+    unaligned pointers, regardless of this patch.
+    
+    Signed-off-by: Dave Martin <dave.martin@linaro.org>
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+
+[33mcommit 28c54c2dba27aae5fef9a97fc7f213f054036550[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Thu Jun 13 17:21:29 2013 +0000
+
+    revert test
+
+[33mcommit 120b43d8efa63e92a588636ccad4d88a9cb9fb06[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Thu Jun 13 17:20:09 2013 +0000
+
+    merge test
+
+[33mcommit c43cf262c52c8beba0cff09b2972e001f1ce1600[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Thu Jun 13 15:36:42 2013 +0000
+
+    prepare kernel for some mods I want to try
+
+[33mcommit c31653652ec639eb46ec3b5d95ddc0cf92f7cf79[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Mon Jun 10 18:29:15 2013 +0000
+
+    merge
+
+[33mcommit 58d7a41bac130e1e458657636ad21cad3ff76184[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Sun Jun 9 11:05:03 2013 -0700
+
+    Linux 3.0.81
+    
+    Signed-off-by: Sultanxda <sultanxda@gmail.com>
+
+[33mcommit aa25ec5aeebecbae5e2edad00ed3de9709dfc120[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Sun Jun 9 20:18:26 2013 +0000
+
+    prepare tree for linux 3.0.81
+
+[33mcommit 1151d02b4783f7cbfd0cc6656d19e4cd67981b1d[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Sat Jun 8 15:43:12 2013 +0000
+
+    Enabled LAGFREE CPU GOVERNOR again and readded LULZACTIVE from Tegrak and Google (NOT enabled for now)
+
+[33mcommit 74a8665c7be20a4b4de1fd53b49c20423b367790[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Thu May 30 10:04:50 2013 +0000
+
+    Revert "Added the lulzactive governor v2 orriginally by tegrak"
+    
+    This reverts commit b03010bd381e4b33104fa323509e202dbc24e0e8.
+
+[33mcommit 795b9e673b542ef8cadc7d93156afd8bcd4f1eca[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Wed May 29 20:18:59 2013 +0000
+
+    adjust build_linaro.sh script from dastin1050 repo to match mine
+
+[33mcommit c9ccceabc09d7a388c297d1e8ea9662ffdc1653c[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Sat May 25 13:18:08 2013 -0700
+
+    Linux 3.0.80
+    
+    Signed-off-by: Sultanxda <sultanxda@gmail.com>
+
+[33mcommit c8f334e93975ec98adc254b1497be832e31e7e2f[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Tue May 21 19:18:18 2013 -0700
+
+    Linux 3.0.79
+    
+    Signed-off-by: Sultanxda <sultanxda@gmail.com>
+
+[33mcommit 79d8e565012679f127750bae2a2b5ae239728783[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Sat May 25 13:11:45 2013 -0700
+
+    Linux 3.0.78
+    
+    Signed-off-by: Sultanxda <sultanxda@gmail.com>
+
+[33mcommit b03010bd381e4b33104fa323509e202dbc24e0e8[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Wed May 29 16:48:51 2013 +0000
+
+    Added the lulzactive governor v2 orriginally by tegrak
+
+[33mcommit 9a7bc01c1b9e035e1540f68c164a400eb20174fe[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Wed May 8 16:34:57 2013 -0700
+
+    Linux 3.0.77
+    
+    Signed-off-by: Sultanxda <sultanxda@gmail.com>
+    
+    Conflicts:
+    	fs/ext4/Kconfig
+
+[33mcommit 3bea840979e1c77e9302e8547a16c83be85269cb[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Sat May 4 22:38:53 2013 -0700
+
+    Threw in some optimization flags for the GPU driver
+
+[33mcommit 82a1de0041bf2fff42536d939c5b4db8bc5057e0[m
+Author: Sultanxda <sultanxda@gmail.com>
+Date:   Sat May 4 19:57:08 2013 -0700
+
+    msm: kgsl: Turn off the CP_DEBUG dynamic clock (credit: jcrouse@CAF)
+
+[33mcommit 4c6c404b0c80c395d860122265021ef2992325b9[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun May 5 00:21:41 2013 -0700
+
+    shooter: revert board changes
+
+[33mcommit 3b148db262e6ab0ac4fa9e6776d1b73e4ace017c[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri May 3 15:18:16 2013 -0700
+
+    Partial Revert of "8660: Various changes"
+    
+    Reverting the changes to board files
+    
+    This was the root cause of bootlooping with some docks that also had MHL
+    
+    Partial revert of commit 2dfd97cdbcc4e2424870581995f2ec1874ef6642.
+    
+    Change-Id: Ibb90cdbe5999d671598547dadb1047b4d0354d3d
+
+[33mcommit 1c2a2d721ad1c2fd61cef21e77cec8d62249fab1[m
+Author: Rohan Mathur <rohanmathur34@gmail.com>
+Date:   Wed May 1 19:11:16 2013 -0400
+
+    Linux 3.0.76
+    
+    Change-Id: If9b9086bea2d18a9eccfbf7a7746f4f346e6b0e9
+    Signed-off-by: Rohan Mathur <rohanmathur34@gmail.com>
+
+[33mcommit e4d062001e44e3b1ceb124a3fa89742ddac14776[m
+Author: Rohan Mathur <rohanmathur34@gmail.com>
+Date:   Wed May 1 19:10:09 2013 -0400
+
+    Linux 3.0.75
+    
+    Change-Id: I3cd079ed9682afccbf531985104a30491950db98
+    Signed-off-by: Rohan Mathur <rohanmathur34@gmail.com>
+
+[33mcommit 711f074b33c6d42509b886eec849023d0b89b490[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Fri May 24 18:15:23 2013 +0000
+
+    CPU: enable badass and xondemand governors
+
+[33mcommit d18d77774bda22218694ffef19ecb2430866a9fd[m
+Author: Chris Baughman <cmartinbaughman@gmail.com>
+Date:   Fri May 24 17:34:04 2013 +0000
+
+    create shooter branch
+
+[33mcommit 5a86392c9a151b46af1ffab1fca18716e17af4c0[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 27 10:22:55 2013 -0700
+
+    Kbuild: add missing headers
+
+[33mcommit 316748af923a6461fe30cef1d39c075c8c2a59f7[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 27 01:28:09 2013 -0700
+
+    defconfig: enable sync
+
+[33mcommit 395210766b6af70096e550254ada5f0e13257f6f[m
+Author: Shruthi Krishna <skrish@codeaurora.org>
+Date:   Wed Nov 21 11:23:50 2012 -0800
+
+    Adding support for trace events for sync point driver
+    
+    Change-Id: Icdbe176f1c651e6a0805ef63b9b7f143ab06a350
+    Signed-off-by: Shruthi Krishna <skrish@codeaurora.org>
+
+[33mcommit 5035f34ada883626ec38efe4f6be9d3ef6c52c1b[m
+Author: Paul Gortmaker <paul.gortmaker@windriver.com>
+Date:   Mon May 23 14:11:39 2011 -0400
+
+    module.h: split out the EXPORT_SYMBOL into export.h
+    
+    A lot of files pull in module.h when all they are really
+    looking for is the basic EXPORT_SYMBOL functionality. The
+    recent data from Ingo[1] shows that this is one of several
+    instances that has a significant impact on compile times,
+    and it should be targeted for factoring out (as done here).
+    
+    Note that several commonly used header files in include/*
+    directly include <linux/module.h> themselves (some 34 of them!)
+    The most commonly used ones of these will have to be made
+    independent of module.h before the full benefit of this change
+    can be realized.
+    
+    We also transition THIS_MODULE from module.h to export.h,
+    since there are lots of files with subsystem structs that
+    in turn will have a struct module *owner and only be doing:
+    
+    	.owner = THIS_MODULE;
+    
+    and absolutely nothing else modular. So, we also want to have
+    the THIS_MODULE definition present in the lightweight header.
+    
+    [1] https://lkml.org/lkml/2011/5/23/76
+    
+    Change-Id: I70a80b3ac3638f0eda1ac596ee3fba832880df07
+    Signed-off-by: Paul Gortmaker <paul.gortmaker@windriver.com>
+    Signed-off-by: Trilok Soni <tsoni@codeaurora.org>
+
+[33mcommit 429008b850f09546448db4853a3f8c772ab60a6d[m
+Author: Shruthi Krishna <skrish@codeaurora.org>
+Date:   Wed Nov 21 00:14:22 2012 -0800
+
+    sync: driver commits
+    
+    - Revert "base: sync: signal a sync pt when not adding to the
+    active_list"
+    - sync: Fix error paths
+    - sync: add tracepoint support
+    - sync: refactor sync debug printing
+    - sync: use proper barriers when waiting indefinitely
+    - sync: update new fence status with sync_fence_signal_pt
+    - sync: dump sync state of fence errors
+    - sync: protect unlocked access to fence status
+    - base: sync: signal a sync pt when not adding to the active_list
+    - sync: improve timeout dumps
+    - sync: use correct signed type when handling SYNC_IOC_WAIT
+    - sync: dump sync state to console on timeout
+    - sync: clean up compiler warnings
+    - sync: fix erase-o in sync_fence_wait
+    - sync: change wait timeout to mirror poll semantics
+    - sync: add reference counting to timelines
+    - sync: add internal refcounting to fences
+    - sync: optimize fence merges
+    - sync: reorder sync_fence_release
+    - sync: export sync API symbols
+    - sync: allow async waits to be canceled
+    
+    Change-Id: Id65ecdd395782d487773bdf7baa3ed681a72b729
+    Signed-off-by: Shruthi Krishna <skrish@codeaurora.org>
+
+[33mcommit 50f8bcfe4b7bd73716977118a083a8eee8eaea6a[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Mon Mar 19 17:28:32 2012 -0700
+
+    sync: add poll support
+    
+    Change-Id: I294e481bba92658e6dd26f157ddbf0e9ff4ce8a5
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit 46976aea5374282e2b9212baa2867b4a5a392a48[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Thu Mar 15 17:46:07 2012 -0700
+
+    sw_sync: add fill_driver_data support
+    
+    Change-Id: Ib3812d282db56362d82f5ccc9a12b7d2100ab93a
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit 74bb8611163f9cc7a1f7dddfa4d0f3f6b991b17f[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Thu Mar 15 17:45:50 2012 -0700
+
+    sync: add ioctl to get fence data
+    
+    Change-Id: I71410aef7e03a52562f7cb15b993ac8441b1fa12
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit e91e7b89e195866b588a58d98bce5052af5b576a[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Thu Mar 15 14:23:23 2012 -0700
+
+    sw_sync: add debug support
+    
+    Change-Id: Ibcc5fa8cb36e283cdf0e3308064876722e2675fc
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit 289b24920ef9008469992b9814ff63704df10041[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Wed Mar 14 19:49:15 2012 -0700
+
+    sync: add debugfs support
+    
+    Change-Id: I8a7ea63e454fbeee1ecf17e6c3caff7c43b24734
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit bec95574acc2bc3652ac4988105b24809de9829c[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Thu Mar 15 14:59:33 2012 -0700
+
+    sync: add timestamps to sync_pts
+    
+    Change-Id: I2ad855072b86873880769a09a3176e85aa1199d7
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit bcbcb7d21ff752cd7f34270742de5bf907276b4f[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Wed Apr 18 13:43:22 2012 -0700
+
+    sw_sync: add cpu based sync driver
+    
+    Change-Id: I1042851f5e30f9fdc2f35bdad84123bcf108560f
+    Signed-off-by: Erik Gilling <konkers@android.com>
+    
+    Conflicts:
+    	drivers/base/Kconfig
+
+[33mcommit 7b0bae1f00db061c35ba35d2ab4c485afe8ce8e1[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 27 01:19:02 2013 -0700
+
+    msm8660: change camera header
+
+[33mcommit 2d491d20540945bfdefae09ba6d633a0be45afc8[m
+Author: Erik Gilling <konkers@android.com>
+Date:   Tue Mar 13 15:34:34 2012 -0700
+
+    sync: Add synchronization framework
+    
+    Change-Id: I209f9db2824e0313f467f11ab09e5f54f0a4a6b5
+    Signed-off-by: Erik Gilling <konkers@android.com>
+
+[33mcommit cccbe79e8a7e046d2b9416db21fbd597a6a17ef8[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 27 00:48:19 2013 -0700
+
+    Kbuild: copy MSM headers
+
+[33mcommit 47ae0ca7df05c44792b613bea098b3bea0a89884[m
+Author: Shubhraprakash Das <sadas@codeaurora.org>
+Date:   Mon Nov 21 13:02:22 2011 -0700
+
+    pmem: Check for valid virtual address while flushing
+    
+    Return invalid error if a NULL virtual address is
+    passed for pmem cache maintenance ioctl's
+    
+    Change-Id: I18c369d4c2ac790b622408a988d171d6f75c4cd3
+    Signed-off-by: Shubhraprakash Das <sadas@codeaurora.org>
+
+[33mcommit 9ff8df1dc9f021e1b19030f88bfdf181df682080[m
+Author: Laura Abbott <lauraa@codeaurora.org>
+Date:   Wed Dec 14 13:34:53 2011 -0800
+
+    pmem: add support for reusable pmem
+    
+    Individual pmem devices can now be marked as reusable. The
+    memory will be reused through fmem.
+    
+    Change-Id: Id71c2e0c42f093420c241771d7a2620ed2accfc4
+    Signed-off-by: Laura Abbott <lauraa@codeaurora.org>
+
+[33mcommit a0c87d19424eee8469279da86a07a7cb8733b17f[m
+Author: Laura Abbott <lauraa@codeaurora.org>
+Date:   Wed Dec 14 14:16:17 2011 -0800
+
+    pmem: Add fmem call backs
+    
+    Add callbacks for request/release region to be used with fmem.
+    These files can be referenced in any board file for use with
+    any pmem device.
+    
+    Change-Id: I1a1791bbf8fc00d3e324600aedb5361aa899bc4f
+    Signed-off-by: Laura Abbott <lauraa@codeaurora.org>
+
+[33mcommit bdb7b55b4d50af4a005bab90b461275fcf0841af[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri Apr 26 01:03:05 2013 -0700
+
+    Re-apply "cpufreq: import updated ondemand from ChronicKernel/Bruce's kernel"
+    
+    This reverts commit 1685af462a832ae64395dc36e73d64925dbf222f.
+
+[33mcommit ff8cc40e9df99b23bab024f8ad62df00ff6e497d[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 25 22:43:09 2013 -0700
+
+    Revert "Re-Apply "Update HTC baterry driver""
+    
+    This reverts commit 0b0ce079e7630d00c41c9143f2ee4bb7e5a0ff99.
+
+[33mcommit c0d737a19637be3cab2b8373af1eacceefacbe08[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 25 22:42:34 2013 -0700
+
+    Partial Revert of "pyramid: merge shooter graphics options with pyramid"
+    
+    Change-Id: I1c112598bd3839650d697dcb45ca5e6fa9b29305
+
+[33mcommit 63819c0a7608d8cfd4e0e327186a4dd7aa786a1a[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 25 22:40:32 2013 -0700
+
+    Partial Revert of "pyramid: Various defconfig changes"
+    
+    Change-Id: I8e6d8ab1b0cc09c22d421a7651455620507748bd
+
+[33mcommit d0e59f33a75f10a91a3152df1cde0a5743992f7d[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Apr 24 09:11:55 2013 -0700
+
+    Linux 3.0.74
+
+[33mcommit c413b1b81ff6efbf6a1ff0b4ecff2ce77402973f[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Apr 22 23:29:19 2013 -0700
+
+    shooter: enable VR IOSCHED and qcom crypto engine
+
+[33mcommit 049725fd83ff772d2f94e5e362dfba66a855c34e[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Apr 22 23:21:00 2013 -0700
+
+    block: allow VR IOSCHED to be chosen
+
+[33mcommit 5e84a9fb80ca6ec1e9e1d1d5475aca1c5e328108[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Mon Apr 22 19:16:26 2013 -0700
+
+    pyramid: Various defconfig changes
+    
+    * Enabled qcom crypto engine
+    * Enabled ROW scheduler
+    * Various small tweaks and optimizations
+    
+    Change-Id: I7ac5c89f75ce74bc00020d657b0f14f04af0e78f
+
+[33mcommit 9bc0090a81e1e3acfdda0c9de7f4d81c7e6fef25[m
+Author: Arne Coucheron <arco68@gmail.com>
+Date:   Mon Apr 22 14:17:33 2013 +0200
+
+    crypto: Add Qualcomm crypto engine
+
+[33mcommit a63172b644244f7f2910046362b375245aec8a04[m
+Author: Arne Coucheron <arco68@gmail.com>
+Date:   Mon Apr 22 09:32:56 2013 +0200
+
+    msm: vidc: Partially update to jb_chocolate
+
+[33mcommit 2dfd97cdbcc4e2424870581995f2ec1874ef6642[m
+Author: Arne Coucheron <arco68@gmail.com>
+Date:   Mon Apr 22 08:27:49 2013 +0200
+
+    8660: Various changes
+    
+    * Align framebuffers to 4k page boundary
+    * Fix MSM_FB_EXT_BUFT_SIZE typo
+    * Fix compile errors when writeback and hdmi are disabled
+
+[33mcommit cda79e078f48506f84a67f0509176695af366ff0[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sun Apr 21 21:16:26 2013 -0700
+
+    pyramid: merge shooter graphics options with pyramid
+    
+    Change-Id: I09a8d79ec125be1ffa5d37915489d3e5bed7966a
+
+[33mcommit 907c90c793f7a706ac5f15f2547b14a1c3087c4e[m
+Author: Lucas De Marchi <lucas.demarchi@profusion.mobi>
+Date:   Sat Aug 20 02:28:53 2011 -0300
+
+    kconfig: fix set but not used variables
+    
+    Some variables were being set but never used, which was triggering
+    warnings in GCC >= 4.6.
+    
+    Signed-off-by: Lucas De Marchi <lucas.demarchi@profusion.mobi>
+    Signed-off-by: Arnaud Lacombe <lacombar@gmail.com>
+
+[33mcommit cca1f1b08f16b9ba65081676de58a709345fc42f[m
+Author: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+Date:   Fri Mar 16 11:32:23 2012 +0530
+
+    msm_fb: Clean up the fix for error in y-offset check in FB driver
+    
+    There is a failure observed in yres_virtual offset check and every
+    third frame gets skipped without an error message. Due to this high
+    fps is noticed in the test applications. Correct the yres_virtual
+    offset check.
+    
+    CRs-fixed: 325134
+    Signed-off-by: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+    (cherry picked from commit 2bd101d5bed1729b317114456360605e86289c15)
+    
+    Change-Id: I35af570df2d6d2609562203f30f3caa1506b9b1d
+    Signed-off-by: Srivalli Oguri <oguri@codeaurora.org>
+
+[33mcommit 8f113477bd88e98303d2ba7bcfe375a4de5ad545[m
+Author: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+Date:   Fri Mar 9 20:16:21 2012 +0530
+
+    msm_fb: Fix error in y-offset check logic in FB driver
+    
+    After 4 KB alignment changes, the frame from 3rd buffer doesn't
+    get updated since during PUT_VSCREEN_INFO ioctl, the driver
+    returns -1 to userspace due to error in logic because the hole
+    size is not considered in calculating the logic for validity of
+    the y-offset. Change fixes this error.
+    
+    CRs-fixed: 325134
+    Signed-off-by: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+    (cherry picked from commit d37b52404236bf4cadf530a238cafc5d6499d32a)
+    
+    Change-Id: Ifccfa25a37fe0f8d86bf5b822d9affe7fa41203a
+    Signed-off-by: Srivalli Oguri <oguri@codeaurora.org>
+
+[33mcommit 21f5109d0ea9c9d5f0d2091eb9489e8fa4e6752a[m
+Author: Jeevan Shriram <jshriram@codeaurora.org>
+Date:   Mon Apr 2 10:20:48 2012 +0530
+
+    msm_fb: display: Assign proper destination rectangles to mdp blit
+    
+    Add check for (90 + Flip Horizontal) and Flip Vertical cases to assign
+    proper destination rectangle parameters to avoid corrupted frame
+    buffer content.
+    
+    CRs-Fixed: 344807
+    Change-Id: I7e7b0b8d26f08f63a6f9c55eedd37f31cf0348d7
+    Signed-off-by: Jeevan Shriram <jshriram@codeaurora.org>
+    (cherry picked from commit 07c82d6ca63c6be28ab897fdb3ccfc1a448c342f)
+
+[33mcommit b7d94739af9b778938d64751321e2a62945eb3d0[m
+Author: Carl Vanderlip <carlv@codeaurora.org>
+Date:   Wed Mar 28 10:17:20 2012 -0700
+
+    video: msm: Load correct default values to QSEED at init
+    
+    The previous QSEED Table 1 values are not suitable values (would end up
+    smoothing and sharpening content which can lead to artifacts).
+    
+    The values loaded by this patch are the suggested default values for QSEED
+    since they do not smooth or sharpen most content (bi-cubic filter), but
+    will slightly smooth low frequency components of the image (i.e. helps
+    reduce artifacts that produce sharp edges on content that is supposed to
+    be a constant color; often introduced by some video encoding algorithms).
+    
+    CRS-Fixed: 338131
+    Signed-off-by: Carl Vanderlip <carlv@codeaurora.org>
+    (cherry picked from commit d89c0e7712dd5cf13769b4d0facfecb93028538c)
+    
+    Change-Id: I3b65661c69402c23f4322366aa4f12e66d661b86
+    Signed-off-by: Gopal G Goberu <ggober@codeaurora.org>
+
+[33mcommit 777d307f4ff5a5bd04b094b1571727e5b6c0d4a9[m
+Author: Adrian Salido-Moreno <adrianm@codeaurora.org>
+Date:   Mon May 21 17:32:07 2012 -0700
+
+    msm_fb: display: Fix invalid x offset programming for YUV444 fmt
+    
+    Source x offset adjustment is not properly programmed for YUV444 format,
+    it is always programmed as 0. Add support for correct x offset
+    adjustment.
+    
+    Change-Id: I73e87f961bda60670cc764c66be955e48ccf2734
+    Signed-off-by: Adrian Salido-Moreno <adrianm@codeaurora.org>
+    Signed-off-by: Ravishangar Kalyanam <rkalya@codeaurora.org>
+
+[33mcommit fc65bac000ce6a5158d96ba2f3a2044a6393748f[m
+Author: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+Date:   Tue Feb 21 12:00:12 2012 +0530
+
+    msm_fb: Clean up of frame buffer 4KB alignment changes
+    
+    Remove redundant code from the 4 KB alignment patch
+    and reduce the overhead of calculation of the hole
+    size by using bitwise operators in its calculation.
+    
+    Change-Id: I1706484249bf8e01b250e91fa87e00f6021d9a72
+    CRs-fixed: 325134
+    Signed-off-by: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+
+[33mcommit c8f3775cebf83b45ef89054f99b81fb37ce45573[m
+Author: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+Date:   Thu Apr 12 11:33:14 2012 +0530
+
+    msm_fb: Make buffers aligned to 4K page boundary
+    
+    This change makes the frame buffers aligned to the page
+    boundary. Improves GPU performance since accessing the
+    frame buffer from page boundary is faster.
+    
+    Change-Id: I17879437dd7cbb9a1758d82321c6e68dbd88b9e0
+    CRs-Fixed: 325134
+    Signed-off-by: Padmanabhan Komanduru <pkomandu@codeaurora.org>
+
+[33mcommit 22d8370eaec2477b2542ebd30fee78c3d6a911e7[m
+Author: Arne Coucheron <arco68@gmail.com>
+Date:   Sun Apr 21 07:41:53 2013 +0200
+
+    msm: rotator: Partial update to jb_chocolate
+
+[33mcommit a1745fbfa08d6f84b05ddf8ea086bd0d4c4bb7e7[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 19 21:33:58 2013 -0700
+
+    shooter: reduce default clock speed
+
+[33mcommit 0b0ce079e7630d00c41c9143f2ee4bb7e5a0ff99[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 18 15:23:57 2013 -0700
+
+    Re-Apply "Update HTC baterry driver"
+    
+    Battery drain reports were a little pre-mature
+    
+    This reverts commit 866c0153335b4eb043aee094d8d25d94b41d6328.
+
+[33mcommit 1685af462a832ae64395dc36e73d64925dbf222f[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Wed Apr 17 18:40:32 2013 -0700
+
+    Revert "cpufreq: import updated ondemand from ChronicKernel/Bruce's kernel"
+    
+    Not 100& that the governor from pyramid was newer, reverting to original for now
+    
+    This reverts commit 23c5e45c3f007f47cd099ecd8dfb92ae227ba981.
+    
+    Change-Id: Ie622bb1be1f7ab18926bc989c60f6299371a127d
+
+[33mcommit 1e9b723b8450f76434f84ffe92b6c62095e7f85d[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Tue Apr 16 21:28:39 2013 -0700
+
+    Linux 3.0.73
+    
+    Change-Id: Ia112926db53a2053993bf4ef0ff715c8b995c0f9
+
+[33mcommit cd6ae77580f197b945db0cf2a5ed4aba6dfc529c[m
+Author: Robert Ramięga <yoddah@gmail.com>
+Date:   Mon Feb 25 12:05:24 2013 +0100
+
+    Always enable IRQ when resuming display.
+    This should fix all the touchscreen freezes.
+
+[33mcommit c00b2fbb01e129e837d0e9d8179ac51bbad89891[m
+Author: Robert Ramięga <yoddah@gmail.com>
+Date:   Tue Feb 19 23:28:13 2013 +0100
+
+    Defer sweep2wake changes till screen is resumed.
+    Idea taken from some Atmel implementation tho I've lost URI there :(
+
+[33mcommit ba817ff3b90f616c8dc0333784d15383ab2957e4[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Tue Apr 16 13:50:03 2013 -0700
+
+    GPU: update genlock to jb-chocolote
+    
+    For use with new display and media repos
+    
+    Change-Id: Ibf0eb4f9dbdfa37081af24b9e1fd3accc3ffce4e
+
+[33mcommit 0ea3bdfbf699748ae684df7fd0bfd58f7c23bbad[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Mon Apr 15 15:22:34 2013 -0700
+
+    vidc: updated headers
+    
+    Change-Id: I853f9dc3c5e2c28a441367ec0f044dc317ba9930
+
+[33mcommit be3079fed3ba650b8958d44bfe9f0c7cc60ee285[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sun Apr 14 12:33:22 2013 -0700
+
+    Revert "Update HTC baterry driver" - seems to cuase battery drain
+    
+    This reverts commit dea22d84878ef3e11ed9e7ee40dda070274a9bd8.
+
+[33mcommit d2ff5d114af71ab0a1ca707a5033377d0c6287b0[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sun Apr 14 12:32:07 2013 -0700
+
+    GPU: Correctly update Adreno/KGSL drivers to jb-chocolote.
+    
+    Change-Id: If9c8e2ff366acc3e6c08e6342f67d32c37a43984
+
+[33mcommit 7fe7bef6b0b3150ba0b6685cb0e38c95094994a2[m
+Author: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+Date:   Sat Apr 6 05:16:03 2013 -0700
+
+    gpu/msm: update from CAF
+    
+    Signed-off-by: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+
+[33mcommit 89b6fa2810a76cfd96954780d5a590969f6e9533[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri Apr 12 16:21:56 2013 -0700
+
+    Suppress "ACPU(x) Speed Change Complete" DMESG logs
+    
+    Change-Id: I7bd0f8bb1856dc0faa7920a14a2bb037a5190014
+
+[33mcommit 61730b14298b572260a07236589768dc5f9e7f80[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri Apr 12 16:11:24 2013 -0700
+
+    Revert "F/SYNC: dynamic f/sync control with SYSFS interface"
+    
+    Was cuasing conflict with other Dynamic fsync implementation
+    
+    This reverts commit cdec190ac818facbd5309f50ee0c7759245b0d34.
+    
+    Change-Id: I669204ab8eeeaa40bf92cabf331aa4c389278e36
+
+[33mcommit 1fa8cc69b689ba756cf46405507fd1b31ee80f41[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri Apr 12 16:00:57 2013 -0700
+
+    Revert "GPU: force gpu clock steps to go up/down 1 at a time vs jumping several steps"
+    
+    This reverts commit 5a8d42831c958686da690215773cb2320aa32c3d.
+
+[33mcommit 770e90200092e7503bd5408ad3f3feba3608768c[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 11 22:35:09 2013 -0700
+
+    CPU: switch back to old mpdecision, new version was causing wake up issues
+    
+    Change-Id: I3470b8415dbd4914b719343c0326ca6efaaffe54
+
+[33mcommit bcb02ebc1a1ee587562c4626c352d31390e5ab81[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 11 22:34:22 2013 -0700
+
+    I/O: switch readahead back to default (128kb)
+    
+     seems to give best real-world results
+    
+    Change-Id: Ic6fa592d10a6e2032192aadcba180b7c74a3822a
+
+[33mcommit dea22d84878ef3e11ed9e7ee40dda070274a9bd8[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Mon Apr 8 03:47:49 2013 +0300
+
+    Update HTC baterry driver
+    
+    code taken from here : https://github.com/sultanxda/sultan-kernel-faux-seb-ION/commit/ba07546e9306d785b27f83f166074bf7bf4b299c#diff-9
+    
+    Change-Id: I30c2eb1aece56d259cfc9b28ff3d9b2bf9f938bc
+
+[33mcommit 023a340c86755f208a1e93be7ff70d459e42fecf[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Thu Apr 11 03:11:51 2013 -0700
+
+    vidc: merge a few changes from CAF jb-chocolote MR1
+    
+    Change-Id: I13de9478b6c7544d60c16abe167e1affc33c8f1a
+
+[33mcommit 116ae18395ad8f0215405aed5ed0029d98f3cd41[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Apr 10 17:45:15 2013 -0700
+
+    LED: fix compile
+
+[33mcommit 266d1cba21d419b736c93ca94112aef609052661[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Tue Apr 9 21:29:06 2013 -0700
+
+    Revert "pyramid: fix building kernel with ROM"
+    
+    This reverts commit 0a42929f1a594334029221a1976fb00fcff47686.
+
+[33mcommit 8911044659a544c5b08737c626da8e871d0d8b61[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Apr 9 21:13:33 2013 -0700
+
+    LED: remove duplicate function
+
+[33mcommit ec91862dc05a9cc4a05b0007603dac9036346a42[m
+Author: showp1984 <showp1984@gmail.com>
+Date:   Sat Apr 7 18:33:06 2012 +0200
+
+    Squash s2w commits
+    
+    sweep2unlock: Add sweep2unlock v0.1
+    
+    Thanks to Ezekeel's gladoskernel source which helped me
+    a lot in understanding how to emulate a virtual powerkey press.
+    The powerkey emulation is largely inspired by his coding for
+    Touch2Wake (Galaxy Nexus).
+    
+    sweep2unlock: check if screen is offline
+    
+    sweep2unlock: remove lck_reverse & checks
+    
+    sweep2unlock: change sleep value, correct typo, add comment
+    
+    sweep2unlock: change conditions
+    
+    Don't assume unlock/lock is triggered if only one
+    condition is met. The new implementation includes
+    checking if 3 barriers are hit before triggering
+    the lock/unlock.
+    This assures only intentional triggering.
+    Also only allow one trigger as long as the finger
+    still touches the screen. Reset and allow another
+    trigger if the all fingers are lifted.
+    
+    sweep2unlock: change barriers for screenoff trigger to avoid taking loads of screenshots :D
+    
+    sweep2unlock: set scr_suspended early so that additional locks/unlocks are avoided
+    
+    sweep2unlock: don't allow jumping through all barriers without having hit them
+    
+    sweep2unlock: use an additional variable to determine if the barrier is already breached
+    
+    sweep2unlock: change values to avoid taking screenshots when touching 'home'
+    
+    sweep2unlock: break the loop if triggered, decrease sleep delay, change values to avoid screenshots when fast sweeping #2
+    
+    sweep2unlock: Change barriers and homebutton back to original values.
+    
+    The screenshot function from the HTC framework should
+    be disabled to avoid taking screenshots. This is the
+    proper way of doing things. We still have the AOSP
+    screenshot variant which can be accessed by pressing
+    Vol.DOWN + POWER at the same time and holding them for
+    about one second.
+    
+    sweep2unlock: restructure early suspend / late resume hack
+    
+    sweep2unlock: relocate main code, reformat it, change debug echo, slight 3rd barrier adjustment
+    
+    sweep2unlock: use wakelocks
+    
+    This solves not triggering irqs while the screen is offline.
+    It has to show how that affects battery life.
+    
+    sweep2wake: rename sweep2unlock
+    
+    sweep2wake: 'fat finger' fix ;)
+    
+    sweep2wake: Add Kconfig entry
+    
+    sweep2wake: redesign wakelocks
+    
+    Only wakelock if necessary and release the wakelock immediately if not.
+    
+    sweep2wake: allow the touchscreen irq to wake the phone
+    
+    sweep2wake: remove wakelocks from the code
+    
+    Since we now have a completely interrupt based wake up call
+    these wakelocks are obsolete so remove them.
+    
+    sweep2wake: fix unresponsive touchscreen (depends on hw revision)
+    
+    sweep2wake: redefine barriers for easier (un)locks
+    
+    sweep2wake: add debug info
+    
+    sweep2wake: fix typo, no need to enable something that is already enabled
+    
+    sweep2wake: increase simulated powerkey press length
+    
+    sweep2wake: Don't set suspended state if screen is not suspended
+    
+    sweep2wake: add cmdline interface (on/off)
+    
+    sweep2wake: reenable all suspend/resume commands if s2w_switch == false
+    
+    cmdline_s2w: add debug output
+    
+    sweep2wake: restructure ifdefs to gain readability
+    
+    sweep2wake: always set suspend=1, reset baseline
+    
+    If this is not set the baseline will not be reset
+    when the device comes from sleep, which results
+    in an unresponsive touchscreen. (Similiar to a
+    gounding issue)
+    
+    sweep2wake: get button-backlight device
+    
+    sweep2wake: enable dynamic button_backlight
+    
+    If the screen is offline and you touch the home button (aka start a
+    sweep2unlock) the capacitive buttons will light up to guide your path.
+    They will be shutdown again as soon as you lift your finger.
+    
+    sweep2wake: fix unlock start position
+    
+    sweep2wake: Only reset the baseline if the screen is suspended, fix for old touchcontroller hwrev
+    
+    sweep2wake: on resume suspend our touch controller for a short while
+    This allows resume to wake it up the right way a bit further down.
+    This is a HW revision fix, it is not needed for all touch controllers!
+    
+    Sadly this breaks the sweep2unlock gesture.
+    
+    sweep2wake: revert resetting the baseline
+    
+    sweep2wake: button_backlight: fix backlight staying on
+    
+    sweep2wake: fix led flickering as far as possible for now
+    
+    sweep2wake: fix button_backlight being activated when sweeping to lock the phone
+    
+    sweep2wake: increase fake suspend time, hw revision fix
+    
+    sweep2wake: fix incorrect debug message
+    
+    sweep2wake: add option to disable the button backlight control
+    
+    input/touchscreen: cy8c: fix multitouch on certain hw revisions
+    
+    sweep2wake: add sysfs-interface
+    
+    sweep2wake: sysfs: no need to set the same value again :)
+    
+    Signed-off-by: showp1984 <showp1984@gmail.com>
+    
+    sweep2wake: sysfs: add missing ifdefs
+    
+    Signed-off-by: showp1984 <showp1984@gmail.com>
+
+[33mcommit b27451ee043822b779f4e17368e562438c9007d8[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Apr 7 23:54:40 2013 -0700
+
+    NFS: fix printf type compiler warning
+    
+    Change-Id: I4a7269a2b60dbe05ecd724abb7176c40f3f2baae
+
+[33mcommit 57e0c05218579253fa22d92d45d01e293eda5f15[m
+Author: Todd Poynor <toddpoynor@google.com>
+Date:   Fri Apr 5 14:28:28 2013 -0700
+
+    ext4: fixup 64-bit divides in 3.0-stable backport of upstream fix
+    
+    Replace C division operators with div64_u64 for divides introduced in:
+    commit 503f4bdcc078e7abee273a85ce322de81b18a224
+    ext4: use atomic64_t for the per-flexbg free_clusters count
+    
+    Specific to the 3.0-stable backport of the upstream patch.
+    
+    Change-Id: Id10180ed16f54f58fc18531092e88f52fc6de31c
+    Reviewed-by: "Theodore Ts'o" <tytso@mit.edu>
+    Signed-off-by: Todd Poynor <toddpoynor@google.com>
+
+[33mcommit 68e57f5d04d8704f7966e3212894c3e75372d03a[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Apr 8 10:31:24 2013 -0700
+
+    Revert "Revert "ext4: use atomic64_t for the per-flexbg free_clusters count""
+    
+    This reverts commit cb74805ca092b7e615bf952e9eea985c923b9462.
+
+[33mcommit 0ad154e43fbbe8cdd6eda8e495bb0327a56bfdd6[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Apr 8 10:29:55 2013 -0700
+
+    Build VR IO schedule and allow it to become default
+
+[33mcommit 81566e8f777605348ccdbc250669b4c231eedf2c[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Mon Apr 8 10:29:26 2013 -0700
+
+    Revert "Fix up CPU OC (2/2)"
+    
+    This reverts commit bb774b11f0abe8273fec96c774dba94481d471c1.
+
+[33mcommit d5254739ed26b957129cb85a26453a65cb0a204c[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Mon Apr 8 10:28:08 2013 -0700
+
+    Revert "Fix up GPU user-configurable OC (2/2)"
+    
+    This reverts commit e14b3e9b881e2af59c4affcc1a9c90d155a36f4f.
+
+[33mcommit 4ed72f48fb616f2fd369d32ce5876f91a9b6a19b[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Mon Apr 8 08:23:02 2013 -0700
+
+    pyramid: silence defconfig warnings
+    
+    Change-Id: I2b1d9c37d41d0db0e6269731380a762daa33834d
+
+[33mcommit 5ad7a7624ae6b50d8afda6f4680a39af9270d300[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sun Feb 3 15:49:32 2013 -0800
+
+    added SIO and V(R) from sultan-kernel-bruce-linaro repo
+
+[33mcommit 7a77e640238d8b31d25b79c72153502975ef0f30[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sun Feb 3 15:48:15 2013 -0800
+
+    remove arch/arm/mach-msm/sio-iosched.c
+    
+    Conflicts:
+    
+    	block/sio-iosched.c
+    
+    Change-Id: Ieb8932ad96a796c94f9d3eac6cb3a7fb95b6b02f
+
+[33mcommit 0fa4c564b147fde754c2f9fbb3c4f212425f075a[m
+Author: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+Date:   Sat Apr 6 05:15:51 2013 -0700
+
+    kgsl: update drivers from CAF
+    
+    Signed-off-by: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+    
+    Conflicts:
+    
+    	drivers/gpu/msm/kgsl.c
+    	drivers/gpu/msm/kgsl_cffdump.c
+    	drivers/gpu/msm/kgsl_device.h
+    	drivers/gpu/msm/kgsl_drm.c
+    	drivers/gpu/msm/kgsl_gpummu.h
+    	drivers/gpu/msm/kgsl_mmu.h
+    
+    Change-Id: I01f370bb53789a6023715aa16db3d7c4ac8e18c8
+
+[33mcommit da68c3e97d032038873358a5f5e776266426e1ca[m
+Author: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+Date:   Sat Apr 6 05:15:38 2013 -0700
+
+    adreno: update drivers from CAF
+    
+    Signed-off-by: helicopter88 <helicopter88@iof303.pnap.ioflood.com>
+    
+    Conflicts:
+    
+    	drivers/gpu/msm/adreno.c
+    	drivers/gpu/msm/adreno_a2xx.c
+    	drivers/gpu/msm/adreno_pm4types.h
+    	drivers/gpu/msm/adreno_ringbuffer.c
+    	drivers/gpu/msm/adreno_ringbuffer.h
+    
+    Change-Id: I073f2438f20660f1384fb3da83d9b18b954b699e
+
+[33mcommit a60347cfe5142735ddc0afaa72b12192f77f27f6[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 6 19:19:21 2013 -0700
+
+    ifdef -O3 flags
+
+[33mcommit 50707f37c20d083f1e9efada5488711b82b46dd4[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 6 19:04:11 2013 -0700
+
+    shooter: update defconfig
+
+[33mcommit 54cdfafd469324d79fb57894aceface7ea5c09bb[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 6 18:01:19 2013 -0700
+
+    USB: add support for USB OTG/HOST MODE support
+
+[33mcommit 37f7bbe85b017fd3efdcae4070697e80a4ef7a8c[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 6 17:56:06 2013 -0700
+
+    shooter: add thermald support
+
+[33mcommit 0a42929f1a594334029221a1976fb00fcff47686[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 11:59:33 2013 -0700
+
+    pyramid: fix building kernel with ROM
+    
+    Change-Id: I2fa3fd4345f7df530567b0da0d838dde7c57ff6c
+
+[33mcommit 29f4b05febaf2e07cba2f3f6d5d3169033bdbdd1[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 09:57:15 2013 -0700
+
+    pyramid: enable USB OTG and USB HID support
+    
+    Change-Id: I0d00eec9cdb6de5323749e6e91380f78d4d80d75
+
+[33mcommit 61f7e83a39c73bfe6c023e8b70d21ba65751f322[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 09:51:26 2013 -0700
+
+    import standalone build script from ChronicKernel
+    
+    Change-Id: I244b498c60ff583ba821c324bf2dae5c79f90777
+
+[33mcommit b31cd39285c2d99a7c1650e574a30e6647be2cc6[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 07:04:37 2013 -0700
+
+    drivers: add thermal for kernel based mpdecision
+    
+    Change-Id: I2fe1870d6bee4b0a7bf460eea476e1df1f33055e
+
+[33mcommit cf1ad8ffe19308eda2c16d09361ba286095cee47[m
+Author: Sultan <sultanxda@gmail.com>
+Date:   Fri Apr 5 22:06:19 2013 -0700
+
+    CPU: Add mpdecision to build
+
+[33mcommit 18aa45cac9e837ccdc1b91cc76d94f607c66791e[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 08:06:18 2013 -0700
+
+    board-pyramid: Changes to allow usage of kernel based mdpecision
+    
+    Change-Id: I8c1699e9022773b46765222d4f7a8636e73c1819
+
+[33mcommit f1e207c7b6d07b14f46a1129dc396b6b157b863f[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:53:23 2013 -0700
+
+    board-pyramid: increase MDP pmem size to fix soft-reboots in cm-10-1
+    
+    Change-Id: I9b23e2d37a7fa0f917c252825a950b20ee57cb96
+
+[33mcommit c044f109a689974e6e0db58348f1649dcb396ef0[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:52:52 2013 -0700
+
+    board-pyramid: add missing MHL GPIOs
+    
+    Change-Id: I11f53de034abf51d912681ee6e440d157b46f304
+
+[33mcommit 11e9fd6bb2e6761fbebd79fadd214ef210b8ff7f[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:52:22 2013 -0700
+
+    board-pyramid: Allow device to be overclocked and undervolted
+    
+    Change-Id: I62292981c36e4fa5b99ffdc3bf331cfb17ff1563
+
+[33mcommit 3cd9a1d54f1d875128f348e78de40e600e0010c9[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:51:47 2013 -0700
+
+    board-pyramid: allow full LED settings control
+    
+    Change-Id: I830829077392480999ea0fb4f2243f541176e84b
+
+[33mcommit bb6828581b5671c7958a31750dfa3f494985cb94[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:50:22 2013 -0700
+
+    board-pyarmid: implement usage for badass 2-phase and 3-phave CPU Governor options
+    
+    Change-Id: I6abcdb47fd057e9ae11715cdc8e3601bc9dfa589
+
+[33mcommit 23c5e45c3f007f47cd099ecd8dfb92ae227ba981[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:48:15 2013 -0700
+
+    cpufreq: import updated ondemand from ChronicKernel/Bruce's kernel
+    
+    Change-Id: I1c466f2576f68412776998e07587027888ff5146
+
+[33mcommit e14b3e9b881e2af59c4affcc1a9c90d155a36f4f[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:46:37 2013 -0700
+
+    Fix up GPU user-configurable OC (2/2)
+    
+    Change-Id: I7f40f5b70e676f26d362f75f0b52a748439bb90b
+
+[33mcommit d240967400c578c297b0de4bc21421a22e777226[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:45:45 2013 -0700
+
+    cpufreq: import some stuff from ChronicKernel/Bruce's kernel
+    
+    Change-Id: I5d301939ba77cd3f383bd13dc412d69b0818f06a
+
+[33mcommit bb774b11f0abe8273fec96c774dba94481d471c1[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:44:29 2013 -0700
+
+    Fix up CPU OC (2/2)
+    
+    Fix mismerge, CPU table was not actually applying
+    
+    Change-Id: I4983e180f90ecb0d4949f4f9a657f7aa487a4930
+
+[33mcommit 2ef9f76ad1eb8f58776975c976d77437641e01e8[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 00:11:12 2013 -0700
+
+    Supress unused-variable warnings and fix compiling with -o3 option
+
+[33mcommit 7f0f31ae151d08b617d9e6c34036aa47a3eaf652[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Wed Feb 13 20:09:27 2013 -0800
+
+    fixed bootloops
+
+[33mcommit 2586ec424113abb7d43ec1c2f7aafeb5705239f0[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Wed Feb 13 17:37:48 2013 -0800
+
+    fixed bootloops for some people, switched to -O3
+    
+    -O3 is the fastest according to benchmarks conducted by Phoronix: http://www.phoronix.com/scan.php?page=article&item=gcc_47_optimizations&num=1
+    Conflicts:
+    
+    	Makefile
+    
+    Change-Id: I9574baa1154a1d642a99738b6696a0a393ff230e
+    Signed-off-by: Matt Filetto <matt.filetto@gmail.com>
+
+[33mcommit c12db01e55475af768230ed0e7cf87e61ea72586[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Mon Feb 11 19:14:40 2013 -0800
+
+    more optimizations
+    Conflicts:
+    
+    	Makefile
+    
+    Change-Id: Iff7cb551d8dad2af79dbf23f2beaa9c4fcb65225
+    
+    Conflicts:
+    
+    	Makefile
+
+[33mcommit 20a81f534e63d9e481bb87785e57afa4caec8a73[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Mon Feb 11 11:30:10 2013 -0800
+
+    removed -ffast-math from modules
+
+[33mcommit 6fd68bbf1c7bd8ae595c75bd48a4b60abf392897[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Mon Feb 11 11:27:48 2013 -0800
+
+    removed -ffast-math
+
+[33mcommit b18d34e68cc281e5450d43209346a81d10211c7f[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Sun Feb 10 22:33:08 2013 -0800
+
+    silenced some warnings when compiling with -Ofast or -O3 (credit: Show-p1984), -O2 build optimizations
+    
+    Conflicts:
+    
+    	Makefile
+    
+    Change-Id: I0e0efccc57a877a7466209b295c7adac99546c7b
+
+[33mcommit 534438a1d6e3383c6f89925a0ce9ba60d59cf4d2[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sun Feb 3 15:15:00 2013 -0800
+
+    merged makefile from sultan-kernel-bruce-linaro
+    
+    Conflicts:
+    
+    	Makefile
+    
+    Change-Id: I2768cab10cdb2bf8d8ec8274c0363493ea8ab69e
+
+[33mcommit e51a898d9f495d201eac5050ba0d62f8c5ca28db[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sun Feb 3 15:16:24 2013 -0800
+
+    Linaro support (from PYD-X)
+    
+    Conflicts:
+    
+    	arch/arm/boot/compressed/Makefile
+    
+    Change-Id: Iecc66571035c3a2e1954c862e1af67043a42bee4
+
+[33mcommit d1e35c3cf832ce107381565ee994084a9d37afd9[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Tue Mar 26 23:59:23 2013 -0700
+
+    bcmhd: switch to PM_FAST when screen off
+    
+    Change-Id: I0a343bca589333975cdc7e184110fa9d210f2788
+
+[33mcommit 4c568b81e5fb8f14d109dbd51b9c7b695a2502f5[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sat Feb 9 18:23:21 2013 -0800
+
+    added frandom support (credit: Ryuinferno)
+    
+    Conflicts:
+    
+    	arch/arm/mach-msm/Makefile
+    
+    Change-Id: Ie5162c5d5b7c4fd39b8897101d1524473c27792f
+
+[33mcommit d697977a0ff0d257e5813c5a86d4ec25fcb7a36c[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Fri Apr 5 22:38:49 2013 -0700
+
+    cpufreq: import additional cpu governors from ChronicKernel
+    
+    Change-Id: Ifd6f2b35a30868de0ada44e40fc8f9a98993e196
+
+[33mcommit dc42ceab33e44f496bbc1106e9f4942e86c97415[m
+Author: Matt Filetto <matt.filetto@gmail.com>
+Date:   Sat Apr 6 04:28:09 2013 -0700
+
+    pyramid: import defconfig from ChronicKernel
+    
+    Change-Id: I1e2f4624cf5f5152889b9d27295eab407ca2c22e
+    
+    Conflicts:
+    
+    	arch/arm/configs/pyramid_defconfig
+
+[33mcommit c9c8058c36558fe4383a5dbefedd367270ef3844[m
+Author: sultanxda <sultanalsawaf@gmail.com>
+Date:   Sat Feb 9 00:15:58 2013 -0800
+
+    disable flash when battery is 15% or lower
+    
+    Conflicts:
+    
+    	arch/arm/mach-msm/board-pyramid.c
+    
+    Change-Id: I8586e85e87dc122473418ce88fbd415a48604987
+
+[33mcommit 41c2934a93178267f4693d86567737347926c382[m
+Author: Sultan Alsawaf <sultan@sultan-Satellite-S855.(none)>
+Date:   Sun Feb 3 15:38:02 2013 -0800
+
+    added fsync control (Ezekeel)
+
+[33mcommit bab30f2d51bf24a898987bc43ffc0089457e09f0[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Apr 6 00:13:40 2013 -0700
+
+    GPU: fix up tables
+
+[33mcommit 4de993de2c1bcd213c4563549f784f8689170d5c[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 22:21:36 2013 -0700
+
+    build SIO IO scheduler
+
+[33mcommit fa02012c6a37f791ee8b990e8f4c8c0d203a6f24[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 22:07:36 2013 -0700
+
+    shooter/pyramid: update defconfig
+
+[33mcommit 5db6dc279c64819280282ccf8299f6b042ecc892[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 22:01:56 2013 -0700
+
+    Add SIO IO scheduler
+
+[33mcommit cb74805ca092b7e615bf952e9eea985c923b9462[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 21:46:46 2013 -0700
+
+    Revert "ext4: use atomic64_t for the per-flexbg free_clusters count"
+
+[33mcommit 98df1467a505d8af12ed87f41714b29fdfe842b9[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 21:30:12 2013 -0700
+
+    Supress unused-variable warnings
+
+[33mcommit 452be1cd0875e62f8d25eca2d007f6d886d08b7b[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 21:22:11 2013 -0700
+
+    msm8660: remove accidentally added function
+
+[33mcommit ce1e272f759eef003e06141a7f400f80d880d49b[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 21:10:55 2013 -0700
+
+    Linux 3.0.72
+
+[33mcommit 5f2c5a11328dac14e322d1a70446cc17432929c7[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 21:09:33 2013 -0700
+
+    CPU/GPU: different OC implementation
+
+[33mcommit b9ebc40f0c3cc30947dff83fc622b064066d7ff5[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 20:50:35 2013 -0700
+
+    shooter/pyramid: update defconfig
+
+[33mcommit 2a2b6b207b40885d97897b3fcaaddd329f169aed[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 11:19:42 2013 -0700
+
+    Remove cmdline options
+
+[33mcommit 2be33128b926d2d007b71266b883717d80db5c9f[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Apr 5 11:05:43 2013 -0700
+
+    Revert "pyramid: add cmdline options"
+    
+    This reverts commit ed48934215c806cd770eacf8897212650407f26a.
+
+[33mcommit bf14df1c4d0b848da05dd4e26cd2dd5387209bed[m
+Author: Darescu Ionut <johnny@esi.ro>
+Date:   Sun Mar 31 09:17:27 2013 -0700
+
+    update more files to use qdsp6_v3
+
+[33mcommit 7881c5e15545012ab6f45a41a2b80d53ee157357[m
+Author: homeslice976 <homeslice976@gmail.com>
+Date:   Mon Feb 4 09:31:25 2013 -0500
+
+    Update to qdsp6 version 3
+    
+    Added qdsp6v3
+    
+    board-pyramid-audio.c: Fixup qdsp6v3
+    
+    build qdspv3 for shooter_u
+    
+    New patchset: leaving the dual mic at 8khz
+    
+    Original patch is http://review.cyanogenmod.org/#/c/34851/
+    Patched to work with shooteru by "Darescu Ionut" aka "johnnyslt"
+    
+    Change-Id: I7e069e65d480c8b3a6a0c44b654cab6994d1ebd9
+
+[33mcommit 03bc597beb5e15c368abf5527dc1c6f0495b8c90[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Apr 3 23:00:32 2013 -0700
+
+    Revert "shooter: enable ION support"
+    
+    This reverts commit 5dd6ded1c8664981ca9357a4d56cd8e4cf074eef.
+
+[33mcommit 7b281619860a461041fdf71c1cc85371bfabdbe4[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Apr 3 00:10:42 2013 -0700
+
+    Update bluetooth to jb_chocolate
+
+[33mcommit 3da5ced7d0d0ea2f07ff3bccbd0b1be778711de4[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Apr 3 00:07:09 2013 -0700
+
+    shooter: add MHL GPIO
+
+[33mcommit 62d9a3b0268ca7a8f49b6ed4bb4a8d2a722f29f8[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Apr 2 23:15:17 2013 -0700
+
+    Update iommu to jb_chocolate
+
+[33mcommit fa05550585ef3af16a81ef3881bc03fe1c7842b2[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Apr 2 23:05:46 2013 -0700
+
+    Update vidc headers
+
+[33mcommit 5dd6ded1c8664981ca9357a4d56cd8e4cf074eef[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Mar 6 09:35:54 2013 -0800
+
+    shooter: enable ION support
+    
+    adapted to shooter from shooteru by Domenico Marino (helicopter88)
+    
+    Change-Id: Ied875fd45723dc060ea89058901c37c3fa8de993
+
+[33mcommit 3d858fc6bc92ee5c4a8867abcd1996f09022bea5[m
+Author: helicopter88 <johnlemon.lol@gmail.com>
+Date:   Wed Mar 6 11:11:32 2013 +0000
+
+    gpu-ion: Add ION support
+    
+    Taken from Lexmaster's kernel
+    Signed-off-by: helicopter88 <johnlemon.lol@gmail.com>
+    
+    Change-Id: I4cdbe443f672c45ddaef67c146e855c8ec341306
+
+[33mcommit cc007e613a3f3e8f5645c363809badb5607b9f41[m
+Author: helicopter88 <johnlemon.lol@gmail.com>
+Date:   Wed Mar 6 11:11:01 2013 +0000
+
+    gpu-msm: Update adreno drivers
+    
+    Change-Id: If4e5e42ca585824ed2ea636895d9645917cd2a1f
+    Signed-off-by: helicopter88 <johnlemon.lol@gmail.com>
+
+[33mcommit cc93b31eac2b6ffd66905cfe618211b3d4822ecd[m
+Author: helicopter88 <johnlemon.lol@gmail.com>
+Date:   Wed Mar 6 11:08:54 2013 +0000
+
+    mach-msm: ION fix up
+    
+    Change-Id: I37f132a71e10c93c42f7cea4e7c7b63a6fa6f5a2
+    Signed-off-by: helicopter88 <johnlemon.lol@gmail.com>
+
+[33mcommit 927bce65139f3d85265823bf8e9482244e7937d0[m
+Author: tbalden <illespal@gmail.com>
+Date:   Wed Apr 3 01:14:56 2013 +0200
+
+    [WIP]: vidc update from caf msm.git jb_chocolate
+    
+    Use fimrware from here: https://github.com/CarbonDev/proprietary_vendor_qcom/blob/master/mako/proprietary/vidc_1080p.fw
+    
+    Change-Id: I445eb46790851a882ba375991bd98c52aa72e2e4
+
+[33mcommit 95b83ad9a24d806bbe4a507df1d3a43d08ae4715[m
+Author: Rohan Mathur <rohanmathur34@gmail.com>
+Date:   Fri Mar 29 11:36:41 2013 -0400
+
+    Linux 3.0.71
+    
+    Change-Id: I702f9c2ddc02b9a24118fef8916303936f3f18c9
+
+[33mcommit ae4cc24e8f0029d110f149484da44de6c2f4ecc2[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Mar 20 21:30:26 2013 -0700
+
+    Linux 3.0.70
+    
+    Change-Id: Ia700ce3a283ba34fb2a01cf4bf4749db30127c25
+
+[33mcommit ed48934215c806cd770eacf8897212650407f26a[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Mar 19 20:01:44 2013 -0700
+
+    pyramid: add cmdline options
+
+[33mcommit 8e0511f947a02ecf8465371e2250bdf3d455f071[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Mar 16 14:21:59 2013 -0700
+
+    Linux 3.0.69
+
+[33mcommit 0096ec75e81135eae0994e087ce1ea6e0b33fd0b[m
+Author: Rohan Mathur <rohanmathur34@gmail.com>
+Date:   Thu Mar 7 22:13:58 2013 -0500
+
+    Linux 3.0.68
+    
+    Change-Id: I6eeb3b64ae63a435c4bcbef6667a31df46d5e5ff
+
+[33mcommit 3168f81f8793eaa8e04e94dbab7956a8115c2ec2[m
+Author: rohan <rohanmathur34@gmail.com>
+Date:   Fri Mar 1 12:10:53 2013 -0500
+
+    Linux 3.0.67
+    
+    Change-Id: I6aeb84dec2e97ea8a0cb1254e89db2b8b5df5d5f
+
+[33mcommit a8de7debbaa6d4d9a3769d4d676e538835a88067[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Feb 20 22:58:18 2013 -0800
+
+    Linux 3.0.66
+
+[33mcommit d9da543cafe3d55d6681f4a973249bb7ad6f5030[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Feb 15 16:14:21 2013 -0800
+
+    Linux 3.0.65
+
+[33mcommit ddd7f9416b58e118ac4c2566a7308052189ce5c1[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Feb 14 20:37:51 2013 -0800
+
+    pyramid: update defconfig
+
+[33mcommit 900aa6d1202f1d062e7dfbb7045c00b62533685a[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Feb 14 20:32:56 2013 -0800
+
+    pyramid: enable ROW scheduler and enable CPU stats
+
+[33mcommit f97753c718f1c916d7519adbf4cb457dc43fe627[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Feb 14 20:28:09 2013 -0800
+
+    pyramid: update defconfig
+
+[33mcommit 5e51a2c4eb46217647f5badd8d0a9384167f2428[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Feb 12 15:01:53 2013 -0800
+
+    shooter: update defconfig
+
+[33mcommit a1ae13803e320a8fea723dc685eb886dc664b5a5[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Feb 12 14:59:05 2013 -0800
+
+    Linux 3.0.64
+
+[33mcommit 758e97d1b55b9d22596e5decbdbdcc5c4bad05fc[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Feb 11 10:08:39 2013 -0800
+
+    shooter: enable ROW scheduler
+
+[33mcommit d26d668b458a3f7908b41e47c11d76ebf412fc97[m
+Author: franciscofranco <franciscofranco.1990@gmail.com>
+Date:   Sat Jan 19 01:39:06 2013 -0800
+
+    block: fixes required to make the kernel compile with ROW.
+    
+    Signed-off-by: franciscofranco <franciscofranco.1990@gmail.com>
+
+[33mcommit 0050d66c8cdcee810f0b9dc050a1a7c2243cd72a[m
+Author: franciscofranco <franciscofranco.1990@gmail.com>
+Date:   Thu Jan 10 00:00:28 2013 -0800
+
+    block: row: squash commits from codeaurora.
+    
+    Signed-off-by: franciscofranco <franciscofranco.1990@gmail.com>
+
+[33mcommit d2131d8a4645605549ede1a820e90a71a45f5a16[m
+Author: Tatyana Brokhman <tlinder@codeaurora.org>
+Date:   Tue Dec 4 16:04:15 2012 +0200
+
+    block: Add API for urgent request handling
+    
+    This patch add support in block & elevator layers for handling
+    urgent requests. The decision if a request is urgent or not is taken
+    by the scheduler. Urgent request notification is passed to the underlying
+    block device driver (eMMC for example). Block device driver may decide to
+    interrupt the currently running low priority request to serve the new
+    urgent request. By doing so READ latency is greatly reduced in read&write
+    collision scenarios.
+    
+    Note that if the current scheduler doesn't implement the urgent request
+    mechanism, this code path is never activated.
+    
+    Change-Id: I8aa74b9b45c0d3a2221bd4e82ea76eb4103e7cfa
+    Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+    Signed-off-by: franciscofranco <franciscofranco.1990@gmail.com>
+
+[33mcommit 9bff743e710d75346278299654fccaa643226cdf[m
+Author: Tatyana Brokhman <tlinder@codeaurora.org>
+Date:   Tue Dec 4 15:54:43 2012 +0200
+
+    block: Add support for reinsert a dispatched req
+    
+    Add support for reinserting a dispatched request back to the
+    scheduler's internal data structures.
+    This capability is used by the device driver when it chooses to
+    interrupt the current request transmission and execute another (more
+    urgent) pending request. For example: interrupting long write in order
+    to handle pending read. The device driver re-inserts the
+    remaining write request back to the scheduler, to be rescheduled
+    for transmission later on.
+    
+    Add API for verifying whether the current scheduler
+    supports reinserting requests mechanism. If reinsert mechanism isn't
+    supported by the scheduler, this code path will never be activated.
+    
+    Change-Id: I5c982a66b651ebf544aae60063ac8a340d79e67f
+    Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+    Signed-off-by: franciscofranco <franciscofranco.1990@gmail.com>
+
+[33mcommit 280fd7a5dca40e3270ee4a64fde947e0147228b7[m
+Author: franciscofranco <franciscofranco.1990@gmail.com>
+Date:   Sat Dec 29 12:38:24 2012 -0800
+
+    Add ROW I/O Scheduler by Qualcomm.
+    
+    Change-Id: I937bfa6d1d7c3911fa5193e4849310a6a04bd0c2
+    Signed-off-by: franciscofranco <franciscofranco.1990@gmail.com>
+    
+    Conflicts:
+    	arch/arm/configs/tf300t_cm10_defconfig
+
+[33mcommit fcbf7f536563e4a5c5179cf2b05c405d69499c50[m
+Merge: 744803d 53b107a
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Feb 7 22:32:34 2013 -0800
+
+    Merge branch 'cm-10.1' of github.com:Team-Hydra/android_kernel_htc_msm8660 into cm-10.1
+
+[33mcommit 744803dd38901db75078f36d9257a96c9b52adf0[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Feb 7 22:32:09 2013 -0800
+
+    Linux 3.0.63
+
+[33mcommit 53b107ad3db9ded19dc841c2d9362530e2f76010[m
+Merge: 0bf4754 c96edb1
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Feb 6 20:38:32 2013 -0800
+
+    Merge pull request #2 from johnnyslt/patch-2
+    
+    Shooter enable Cpu Stats
+
+[33mcommit 0bf47544f7f562b868115b1283d8dae32457145a[m
+Merge: c747981 7fa76e3
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Feb 6 20:38:22 2013 -0800
+
+    Merge pull request #1 from johnnyslt/patch-1
+    
+    ShooterU enable Cpu Stats
+
+[33mcommit c747981c08f883bf57c0299c4d1bce2ecb774bf3[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Feb 6 20:09:16 2013 -0800
+
+    shooter/shooteru: enable time in state
+
+[33mcommit d4ec8cabfd1ab2c4924ef91d88ddb0171be0f23b[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Feb 6 19:05:11 2013 -0800
+
+    bcmdhd: allow only unicast packets when screen is off
+    
+    It seems HTC uses an ioctl instead of the packet filter to block broadcast a
+        multicast packets but this does not work with the latest firmware.
+    
+        Bring back dhd_set_packet_filter.
+    
+    Adapted to msm8660 from original commit by paulb-nl
+
+[33mcommit c96edb1bbaf9aa59435c6e34a30abf4b2b2bb9eb[m
+Author: johnnyslt <johnny@esi.ro>
+Date:   Mon Feb 4 21:39:14 2013 +0200
+
+    Enable Cpu Stats
+
+[33mcommit 7fa76e38e39bb38669a1f19a6a8a3b7bbbf2a24f[m
+Author: johnnyslt <johnny@esi.ro>
+Date:   Mon Feb 4 21:37:58 2013 +0200
+
+    Enable Cpu Stats
+
+[33mcommit 3de674d9f764dfc7f3ec7984e018c6bf1b47e8bb[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Feb 2 16:50:38 2013 -0800
+
+    Linux 3.0.62
+
+[33mcommit f055d179d5cb9bdb33825eec426bd8d61ef0291b[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Jan 28 11:19:03 2013 -0800
+
+    drivers: usb: fix missing code
+
+[33mcommit 5333978162c9d49d78b5c1d67dbe32dc8440f8b1[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sat Jan 26 21:29:05 2013 -0800
+
+    Revert "msm: vidc: Allow client to request sps/pps per IDR frame"
+    
+    This reverts commit 8bcc0eb62ec2914372b537a40e87d4863b8869d4.
+
+[33mcommit 8bcc0eb62ec2914372b537a40e87d4863b8869d4[m
+Author: Deva Ramasubramanian <dramasub@codeaurora.org>
+Date:   Wed Sep 26 22:58:45 2012 -0700
+
+    msm: vidc: Allow client to request sps/pps per IDR frame
+    
+    Expose SET_SPS_PPS_FOR_IDR to allow client request sps/pper per IDR
+    frame.
+    
+    Change-Id: I0316d751bd1e0b412972cba9d4d59b142500a51d
+    Signed-off-by: Deva Ramasubramanian <dramasub@codeaurora.org>
+
+[33mcommit 55b01cf1735aecb7934308e32328e55f5f24a697[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Jan 24 23:10:44 2013 -0800
+
+    shooter/shooteru: update defconfig
+
+[33mcommit c79fe358e55beea1a2d6fec020c9054b40db5c2c[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Thu Jan 24 22:36:51 2013 -0800
+
+    Linux 3.0.61
+
+[33mcommit fc0ac058fde93e699750580be739ad67e548e9c3[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Jan 23 12:57:10 2013 -0800
+
+    defconfig: update defconfigs
+
+[33mcommit 22e9c3118384456964f290acb38f211b5c487ad5[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Jan 22 23:59:01 2013 -0800
+
+    Revert "power: fbearlysuspend: add sleep hack for CRT-off animation"
+    
+    This reverts commit 079a699552e81127fc7ce41bcf1265b661ce632c.
+
+[33mcommit d2486c4f319a8627efd1032be46e3adff3aa4b22[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Jan 22 23:01:55 2013 -0800
+
+    shooter/shooteru: push up max cpufreq
+
+[33mcommit 0aaa5ff41567be080197839cd8dea318014aeb56[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun Jan 20 22:12:27 2013 -0800
+
+    drivers: led: fix unterminated #ifdef
+
+[33mcommit 934409f7da0d81f606fc1d4525bba136ee8a2f0c[m
+Author: Chad Goodman <cgoodman@hp-tablet.(none)>
+Date:   Sun Oct 14 11:01:18 2012 -0700
+
+    FSB: define 360MHz FSB
+
+[33mcommit 1a8459a466e7e7bd5af55d799c54cd7ce29e97af[m
+Author: Chad Goodman <cgoodman@hp-tablet.(none)>
+Date:   Sun Oct 14 10:39:22 2012 -0700
+
+    GPU: dont OC by default, allow SYSFS contol over max clock
+
+[33mcommit 0a3fffe18186d8191ba1ef183f074078837118ef[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:28:50 2012 -0700
+
+    AUDIO: add support for external USB attached DAC devices
+
+[33mcommit df9f685e9fc304a274fb64f75feeb179677c1039[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:20:17 2012 -0700
+
+    LED: allow userspace control over notification LED timeout
+    
+    Conflicts:
+    	drivers/leds/leds-pm8058.c
+
+[33mcommit cdec190ac818facbd5309f50ee0c7759245b0d34[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:19:24 2012 -0700
+
+    F/SYNC: dynamic f/sync control with SYSFS interface
+
+[33mcommit 68b3e67a9a5aca9d50ceb9fa8b93099d8282663c[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:17:43 2012 -0700
+
+    LED: dynamic LED brightness
+
+[33mcommit 514ebdb9b22789ae60584f9e5ff77bdd2c8c22c8[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:08:27 2012 -0700
+
+    VDD: adjust voltage regulators min/max range for cpu
+
+[33mcommit 6d736a9be1bf3eee6ccb93184fca3b3490c6f454[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:04:24 2012 -0700
+
+    GPU: Overclock 2D and 3D gpu. set GPU Bus to match requirements of GPU clock
+
+[33mcommit d06dcda3e51b82658b803766b714f25edcb622e3[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:01:19 2012 -0700
+
+    GPU 3D: define 300Mhz 3D GPU clock
+
+[33mcommit 20674df2807291022ce018c99e04efe70c52fa72[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 16:59:03 2012 -0700
+
+    2D: define 266Mhz 2D GPU clock
+
+[33mcommit 64c7d16fcf8b35c3d83cabbcfd166f67a74f7b06[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun Jan 20 15:08:47 2013 -0800
+
+    config: update shooter/shooteru defconfig
+
+[33mcommit 0ef05139fcab1471418f8a87a8ccbc4ad3b87ac1[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Jan 18 22:19:26 2013 -0800
+
+    fs: fix typo in part of patch I added manually
+
+[33mcommit becb7b99918bcbd670cd1c10a812b8ad28a6b0a9[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Jan 18 21:02:47 2013 -0800
+
+    PATCH: Linux 3.0.60
+
+[33mcommit 157ae0a672f0d16a0ce7e548d4448c451d2a9a58[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Jan 18 20:52:02 2013 -0800
+
+    PATCH: Linux 3.0.59
+
+[33mcommit cced87d0b2bd680ccbc7f2e213fd1fa0632e807f[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Jan 11 16:13:45 2013 -0800
+
+    add missing part of patch
+
+[33mcommit de3437842fc6339548a2e39657a6a7a9a5cf8fac[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Jan 11 16:11:04 2013 -0800
+
+    PATCH: Linux 3.0.58
+
+[33mcommit 2e32dac56e98bff67a72c39f80fdc6ab9e389d68[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Tue Jan 8 00:07:33 2013 -0800
+
+    shooteru: fix typo
+
+[33mcommit eb2225e8a9e71035d5c8126a3af465a90dfe3179[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Jan 7 23:14:40 2013 -0800
+
+    defconfig: set min and max freq
+
+[33mcommit 85a2733f7e6753552c5255d184d20cd47f18ac24[m
+Author: Chad Goodman <cgoodman@hp-tablet.(none)>
+Date:   Sun Oct 14 11:05:37 2012 -0700
+
+    CPU: make use of faster L2 (and FSB) clocks
+
+[33mcommit 1f28833df7be2c94acb08837f459d0745aa40002[m
+Author: Chad Goodman <cgoodman@hp-tablet.(none)>
+Date:   Sun Oct 14 11:02:40 2012 -0700
+
+    L2: add 1458, 1512, 1566 L2 Clocks, and set 1404 and over to 360MHz FSB
+
+[33mcommit 75003dd0115dfb31025df5db936f12ca3ba8d387[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 22:30:02 2012 -0700
+
+    CPU: raise PERFLOCK clocks to 1.5Ghz
+
+[33mcommit 9a077d7ebb6d73ac411c9c26a76cfda53218d040[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:35:42 2012 -0700
+
+    CPU: allow overclock of cpu to 1.7Ghz
+
+[33mcommit 4f444227d253c8533188acaf4aeea6f389e786a4[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Mon Jan 7 22:57:01 2013 -0800
+
+    remove anthrax naming
+
+[33mcommit 20f3dcdaed9e58b8ab639411e1f594467e05c1a4[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:32:32 2012 -0700
+
+    KERNEL: allow AROMA installer to customize some settings (big time thanks Chad)
+
+[33mcommit 023083c5ca6c3e9c34467d55cc3bc0f57392c10f[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Fri Nov 2 12:30:12 2012 -0700
+
+    SWEEP2WAKE: updates to the driver to allow config via aroma
+
+[33mcommit 5f9db454aa5088df8d8190d811f0f96d2017197b[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:17:04 2012 -0700
+
+    CHARGE: force AC charge mode for unknown USB connection types
+
+[33mcommit 87084de67f168bdd20773597b2a11ba4c484c979[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:16:08 2012 -0700
+
+    CHARGE: allow userspace control over USB charge mode
+    
+    Conflicts:
+    	arch/arm/mach-msm/Makefile
+
+[33mcommit 01f6a15c0576eda41d0ef49e87150b087f297f33[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:21:08 2012 -0700
+
+    INPUT: add support for sweep2wake for gsm and cdma
+    
+    Conflicts:
+    	drivers/leds/leds-pm8058.c
+
+[33mcommit 644667ed7943b53c871ec992abc02ea921390f47[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Thu Oct 25 15:37:59 2012 -0700
+
+    VM: increase default MAX read-ahead
+
+[33mcommit 5a8d42831c958686da690215773cb2320aa32c3d[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:44:30 2012 -0700
+
+    GPU: force gpu clock steps to go up/down 1 at a time vs jumping several steps
+
+[33mcommit 3a63260d3d20a7161f6c7b576739fa590c798a3f[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun Dec 30 22:09:12 2012 -0800
+
+    defconfig: enable UHID
+
+[33mcommit f23707fa9cb7695fd34d3e040f146b713f501105[m
+Author: Alan Ott <alan@signal11.us>
+Date:   Tue Jan 18 03:04:39 2011 -0500
+
+    HID: Add Support for Setting and Getting Feature Reports from hidraw
+    
+    Per the HID Specification, Feature reports must be sent and received on
+    the Configuration endpoint (EP 0) through the Set_Report/Get_Report
+    interfaces.  This patch adds two ioctls to hidraw to set and get feature
+    reports to and from the device.  Modifications were made to hidraw and
+    usbhid.
+    
+    New hidraw ioctls:
+      HIDIOCSFEATURE - Perform a Set_Report transfer of a Feature report.
+      HIDIOCGFEATURE - Perform a Get_Report transfer of a Feature report.
+    
+    Change-Id: I9bc52faf4af89f943b10d575f266a7f27b7469a0
+    Signed-off-by: Alan Ott <alan@signal11.us>
+    Signed-off-by: Antonio Ospite <ospite@studenti.unina.it>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 6b78d694fb11008b22a546c235674330dd22e3e2[m
+Author: Vinicius Costa Gomes <vinicius.gomes@openbossa.org>
+Date:   Sat Jul 14 18:59:25 2012 -0300
+
+    HID: uhid: Fix sending events with invalid data
+    
+    This was detected because events with invalid types were arriving
+    to userspace.
+    
+    The code before this patch would only work for the first event in the
+    queue (when uhid->tail is 0).
+    
+    Signed-off-by: Vinicius Costa Gomes <vinicius.gomes@openbossa.org>
+    Reviewed-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 6bccebbd3362076ec0f9cbd07d5840c22021dcbf[m
+Author: Jiri Kosina <jkosina@suse.cz>
+Date:   Mon Jun 18 17:08:08 2012 +0200
+
+    HID: uhid: silence gcc warning
+    
+    gcc is giving me:
+    
+    drivers/hid/uhid.c: In function ‘uhid_hid_get_raw’:
+    drivers/hid/uhid.c:157: warning: ‘len’ may be used uninitialized in this function
+    
+    which is clearly bogus, as
+    
+    - when used as memcpy() argument, it's initialized properly
+    - the code is structured in a way that either 'ret' or 'len'
+      is always initialized, so the return statement always has
+      an initialized value.
+    
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 33248c1270ea33b2b70b22bd20f491e4797cb17e[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:28 2012 +0200
+
+    MAINTAINERS: add UHID entry
+    
+    Add an UHID entry to the MAINTAINERS file.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit eea7c1f6f8718ac6769b6b9853accdb6b5bda368[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:27 2012 +0200
+
+    HID: uhid: add example program
+    
+    This adds an example user-space program that emulates a 3 button mouse
+    with wheel. It detects keyboard presses and moves the mouse accordingly.
+    
+    It register a fake HID device to feed the raw HID reports into the kernel.
+    In this example, you could use uinput to get the same result, but this
+    shows how to get the same behavior with uhid so you don't need HID parsers
+    in user-space.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 61a4dcb1370fc3249cb282512312308697848ecc[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:26 2012 +0200
+
+    HID: uhid: add documentation
+    
+    This describes the protocol used by uhid for user-space applications. It
+    describes the details like non-blocking I/O and readv/writev for multiple
+    events per syscall.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 248e5a098eaeccd7cb9ecae75038ae0d9e86f6e2[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:25 2012 +0200
+
+    HID: uhid: implement feature requests
+    
+    HID standard allows sending a feature request to the device which is
+    answered by an HID report. uhid implements this by sending a UHID_FEATURE
+    event to user-space which then must answer with UHID_FEATURE_ANSWER. If it
+    doesn't do this in a timely manner, the request is discarded silently.
+    
+    We serialize the feature requests, that is, there is always only a single
+    active feature-request sent to user-space, other requests have to wait.
+    HIDP and USB-HID do it the same way.
+    
+    Because we discard feature-requests silently, we must make sure to match
+    a response to the corresponding request. We use sequence-IDs for this so
+    user-space must copy the ID from the request into the answer.
+    Feature-answers are ignored if they do not contain the same ID as the
+    currently pending feature request.
+    
+    Internally, we must make sure that feature-requests are synchronized with
+    UHID_DESTROY and close() events. We must not dead-lock when closing the
+    HID device, either, so we have to use separate locks.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit f0930b0d0b60e0b3e653ea669a1c80e38eea2230[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:24 2012 +0200
+
+    HID: uhid: forward raw output reports to user-space
+    
+    Some drivers that use non-standard HID features require raw output reports
+    sent to the device. We now forward these requests directly to user-space
+    so the transport-level driver can correctly send it to the device or
+    handle it correspondingly.
+    
+    There is no way to signal back whether the transmission was successful,
+    moreover, there might be lots of messages coming out from the driver
+    flushing the output-queue. However, there is currently no driver that
+    causes this so we are safe. If some drivers need to transmit lots of data
+    this way, we need a method to synchronize this and can implement another
+    UHID_OUTPUT_SYNC event.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 22d2b4c081f4ab394a5c2b4037f6ddbd48226b83[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:23 2012 +0200
+
+    HID: uhid: forward output request to user-space
+    
+    If the hid-driver wants to send standardized data to the device it uses a
+    linux input_event. We forward this to the user-space transport-level
+    driver so they can perform the requested action on the device.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 3a4b3c44bf7ecec24eb0394581b4169148afcef3[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:22 2012 +0200
+
+    HID: uhid: forward open/close events to user-space
+    
+    HID core notifies us with *_open/*_close callbacks when there is an actual
+    user of our device. We forward these to user-space so they can react on
+    this. This allows user-space to skip I/O unless they receive an OPEN
+    event. When they receive a CLOSE event they can stop I/O again to save
+    energy.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit d0c248be09db141f3f32e051bb841503615dea4b[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:21 2012 +0200
+
+    HID: uhid: add UHID_START and UHID_STOP events
+    
+    We send UHID_START and UHID_STOP events to user-space when the HID core
+    starts/stops the device. This notifies user-space about driver readiness
+    and data-I/O can start now.
+    
+    This directly forwards the callbacks from hid-core to user-space.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 4ab602088b852a4ffcc056e6c8294360ea658663[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:20 2012 +0200
+
+    HID: uhid: forward hid report-descriptor to hid core
+    
+    When the uhid_hid_parse callback is called we simply forward it to
+    hid_parse_report() with the data that we got in the UHID_CREATE event.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 1f2164add2e25bda1d209796c5480152e61c4fc8[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:19 2012 +0200
+
+    HID: uhid: allow feeding input data into uhid devices
+    
+    This adds a new event type UHID_INPUT which allows user-space to feed raw
+    HID reports into the HID subsystem. We copy the data into kernel memory
+    and directly feed it into the HID core.
+    
+    There is no error handling of the events couldn't be parsed so user-space
+    should consider all events successfull unless read() returns an error.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 247a693b79732dd6e372b6adaedd578afe4daf19[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:18 2012 +0200
+
+    HID: uhid: add UHID_CREATE and UHID_DESTROY events
+    
+    UHID_CREATE and UHID_DESTROY are used to create and destroy a device on an
+    open uhid char-device. Internally, we allocate and register an HID device
+    with the HID core and immediately start the device. From now on events may
+    be received or sent to the device.
+    
+    The UHID_CREATE event has a payload similar to the data used by
+    Bluetooth-HIDP when creating a new connection.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit f0cdb4e137b73dc3873596c246507f5178f30934[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:17 2012 +0200
+
+    HID: uhid: implement write() on uhid devices
+    
+    Similar to read() you can only write() a single event with one call to an
+    uhid device. To write multiple events use writev() which is supported by
+    uhid.
+    
+    We currently always return -EOPNOTSUPP but other events will be added in
+    later patches.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 6f155595e23b0457d332879323ec3eee4e154d2d[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:16 2012 +0200
+
+    HID: uhid: implement read() on uhid devices
+    
+    User-space can use read() to get a single event from uhid devices. read()
+    does never return multiple events. This allows us to extend the event
+    structure and still keep backwards compatibility.
+    
+    If user-space wants to get multiple events in one syscall, they should use
+    the readv()/writev() syscalls which are supported by uhid.
+    
+    This introduces a new lock which helps us synchronizing simultaneous reads
+    from user-space. We also correctly return -EINVAL/-EFAULT only on errors
+    and retry the read() when some other thread captured the event faster than
+    we did.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 8acac2289674dab5a7ac898b7ea7d936fdbcc4dc[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:15 2012 +0200
+
+    HID: uhid: allow poll()'ing on uhid devices
+    
+    As long as the internal buffer is not empty, we return POLLIN to
+    user-space.
+    
+    uhid->head and uhid->tail are no atomics so the comparison may return
+    inexact results. However, this doesn't matter here as user-space would
+    need to poll() in two threads simultaneously to trigger this. And in this
+    case it doesn't matter if a cached result is returned or the exact new
+    result as user-space does not know which thread returns first from poll()
+    and the following read(). So it is safe to compare the values without
+    locking.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 90a8b32b0abb6b64b701103e4d5373b589638f34[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:14 2012 +0200
+
+    HID: uhid: add internal message buffer
+    
+    When receiving messages from the HID subsystem, we need to process them
+    and store them in an internal buffer so user-space can read() on the char
+    device to retrieve the messages.
+    
+    This adds a static buffer for 32 messages to each uhid device. Each
+    message is dynamically allocated so the uhid_device structure does not get
+    too big.
+    
+    uhid_queue() adds a message to the buffer. If the buffer is full, the
+    message is discarded. uhid_queue_event() is an helper for messages without
+    payload.
+    
+    This also adds a public header: uhid.h. It contains the declarations for
+    the user-space API. It is built around "struct uhid_event" which contains
+    a type field which specifies the event type and each event can then add a
+    variable-length payload. For now, there is only a dummy event but later
+    patches will add new event types and payloads.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit 2f1aee66fb429b0c9d5c4eedc729a5fbb0c5651b[m
+Author: David Herrmann <dh.herrmann@googlemail.com>
+Date:   Sun Jun 10 15:16:13 2012 +0200
+
+    HID: uhid: introduce user-space I/O driver support for HID
+    
+    This adds a dummy driver that will support user-space I/O drivers for the
+    HID subsystem. This allows to write transport-level drivers like USB-HID
+    and Bluetooth-HID in user-space.
+    
+    Low-Energy Bluetooth needs this to feed HID data that is parsed in
+    user-space back into the kernel.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@googlemail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[33mcommit fa3819374006676a3ad1e146df276491b40521a2[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Fri Dec 21 13:08:04 2012 -0800
+
+    arch: arm: include: remove rej file
+
+[33mcommit ef24605fd14ec0293cd4b1cb32d6d4641e719e29[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Thu Dec 20 19:11:29 2012 -0800
+
+    PATCH: Patch to Linux 3.0.57
+
+[33mcommit e73785d14a9ee25b714b7105f7be63de47ef4df8[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Wed Dec 19 22:59:40 2012 -0800
+
+    revert previous patch on 3D clock
+
+[33mcommit f0e2ab9f4e3c57092b14a04547eb763f26fa0244[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Mon Dec 17 08:20:45 2012 -0800
+
+    DEVICE: patch from Chad Goodman to help prevent (gfx2d1_clk status stuck at 'off') errors
+
+[33mcommit b370cf095b58506dbe0c1b9605335741b130070a[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Mon Dec 10 20:11:39 2012 -0800
+
+    PATCH: patch to linux 3.0.56
+
+[33mcommit 238c669f3115af3f27ed43b3e4963f5460695441[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun Dec 9 21:07:44 2012 -0800
+
+    DRIVERS: DM: fix compile error: warning: unused variable 'rc'
+
+[33mcommit 1da1cddd9fe65272ae043b363e266c787a80ef7b[m
+Author: Dorian Snyder <dastin1015@gmail.com>
+Date:   Sun Dec 9 20:57:59 2012 -0800
+
+    ARCH: ARM: remove bpf_jit
+
+[33mcommit d0cfba2ba72a4497cb9736271cc8b085420456d8[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 22:35:58 2012 -0700
+
+    CRYPTO: add support for AES128+SHA1 encryption/decryption
+
+[33mcommit c716673b3fe464b7eb1f7a2cc1e0ec5c87e39728[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 22:37:00 2012 -0700
+
+    ARM: use generic strnlen_user and strncpy_from _user
+
+[33mcommit c0dbf7ffd52d6c766573e405bbcd86187eb6a47c[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 22:28:58 2012 -0700
+
+    ZCACHE: update ZCACHE drivers
+
+[33mcommit 3444f8f1fbffc4e02ae85759826c11c448167f5d[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 22:27:47 2012 -0700
+
+    ZRAM: update ZRAM drivers
+
+[33mcommit 7bfbafe481e32a1bedac25bc9c2e932e81ccafc4[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:24:14 2012 -0700
+
+    SHA-1: use git implementation of SHA-1
+
+[33mcommit ca2855b95b147cbf7802574739c2a0c86e69a5d1[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:23:16 2012 -0700
+
+    LZO: update to latest version of LZO driver
+
+[33mcommit 9e768e2b022528476c3451d4bf0302b2b753d916[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:14:12 2012 -0700
+
+    MEMCOPY: use glibc version
+
+[33mcommit 397405d39705f0aa5c4d922b54c30a9b97eb4edc[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:13:20 2012 -0700
+
+    CPU: Allow CPU-based alignment handling
+
+[33mcommit 5b7a5788f965986721ee24b25d04cbbf176b58a2[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:10:25 2012 -0700
+
+    VFP: compile VFP with NEON optimizations
+
+[33mcommit f4f7bb4d7d3c70b0ce45ec57d9dfae14146fab01[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 17:05:45 2012 -0700
+
+    CPU: allow userspace control over cpu voltage
+
+[33mcommit ac92bfbef368610cafb43649a9cc04e7d59497e5[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 16:56:32 2012 -0700
+
+    OPTIMIZE: add optimizations and add optimization level to menuconfig
+
+[33mcommit 980882d320f3fa774049842e5a42e5b1597afea2[m
+Author: bigwillyg <guillermogutierrezjr@gmail.com>
+Date:   Fri Oct 12 16:55:05 2012 -0700
+
+    LINARO: linaro 4.7.2 2012.09 -O3 compliance fixes
+
+[33mcommit 1b0b841d4d93ec9d4b4467ea8eafae729d820f03[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Sun Oct 28 22:12:10 2012 -0700
+
+    TOUCHSCREEN-ATMEL: cm multitouch fix (seems to not affect sense)
+
+[33mcommit 9ee18af944f2c5640988fa1aa51eed102354923b[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Wed Dec 5 20:58:57 2012 -0800
+
+    PATCH: patch to linux 3.0.55
+
+[33mcommit de8e383dc999e1e3ccea61293129d9eff5d2efea[m
+Author: Chad Goodman <cgoodman@HP-EliteBook-2730p.(none)>
+Date:   Mon Dec 3 20:44:44 2012 -0800
+
+    PATCH: patch to linux 3.0.54
+
+[33mcommit 6b4d2638c03a29a5a6f667421eb3e70b6d30afb4[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Dec 2 23:02:11 2012 -0800
+
+    doubleshot: disable AOSP wifi modification
+    
+    This kernel uses HTC BCMDHD driver, which wants this.
+
+[33mcommit b3f1ad691664714630ce021fc0dedc8bf295e4df[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Dec 2 22:37:04 2012 -0800
+
+    leds: leds-microp: fix compiler warnings
+
+[33mcommit 1cf6f55bde1f461f1ba21b88474bfeff331bf068[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Dec 2 22:36:43 2012 -0800
+
+    msm: htc_battery_core: use correct index
+
+[33mcommit 69b640fe79f639adda2d801a5c48b0f53b564ce5[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Dec 2 00:58:22 2012 -0800
+
+    ruby: set wl12xx and wifi as modules
+
+[33mcommit 5012d13343fd8096701d5923720756cea9cf7761[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sat Dec 1 22:15:16 2012 -0800
+
+    vidc: move vidc makefile definition
+
+[33mcommit 4be2cedef843136bbc19bc27f0f0162dd8af112b[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sat Dec 1 22:14:38 2012 -0800
+
+    vidc: remove 7x30 remnants
+
+[33mcommit a476d76da8faa86c6c3dc0af7a78dc379630eaae[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sat Dec 1 21:42:48 2012 -0800
+
+    msm_fb: display: fix default MDP colorspace
+
+[33mcommit 9261a3aab974db0a376d3a398e4302e6ba53ca76[m
+Author: Shane Passmore <h8rift@gmail.com>
+Date:   Sat Dec 1 21:44:00 2012 -0600
+
+    board-holiday-audio: adjust acoustic tables for audience chip enabled holiday devices.
+
+[33mcommit d2085dfd5991f23bd597097103eb15c4c7553f73[m
+Author: Adrian Salido-Moreno <adrianm@codeaurora.org>
+Date:   Mon Aug 15 10:40:40 2011 -0700
+
+    msm_fb: display: add YUV444 interleave format support to mdp
+    
+    Add support for H1V1 interleave (YUV444) to mdp
+    
+    Change-Id: I86b76831ad87dede90ddd8d8f5ae64e51fa28c27
+    Signed-off-by: Kyong Hwa Bae <kbae@codeaurora.org>
+    Signed-off-by: Adrian Salido-Moreno <adrianm@codeaurora.org>
+    Signed-off-by: Siddhartha Agrawal <agrawals@codeaurora.org>
+    
+    Conflicts:
+    	drivers/video/msm/mdp4_overlay.c
+
+[33mcommit 08b8c8a496aaf028d13c5104d82e408b1faf20fe[m
+Author: tbalden <illespal@gmail.com>
+Date:   Sat Dec 1 15:31:44 2012 -0800
+
+    doubleshot: import files needed for doubleshot support
+
+[33mcommit 9dd69c9a2e71456718b76c8bfbbd9e86753e0e63[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sat Dec 1 15:46:19 2012 -0800
+
+    media: msm: cleanup sensors build
+
+[33mcommit f3a78f94f49fe4349362acc6e58865d517c8a904[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 29 20:37:03 2012 -0800
+
+    msm: HTC 8660: update defconfigs for bluetooth
+
+[33mcommit bddcdd3802d97220b6e4165cb6c5503b55c88539[m
+Author: Kevin Bruckert <agrabren@yahoo.com>
+Date:   Sun Jul 1 00:01:01 2012 -0700
+
+    tty: serial: bcm: add lpm support
+
+[33mcommit 18281ee40b1adf41bd4ae4cc0479759bbe1ebc65[m
+Author: jared waters <kushdeck@gmail.com>
+Date:   Thu Nov 29 19:17:08 2012 -0800
+
+    Bluetooth: reset to AOSP to fix BT for HTC 8660
+
+[33mcommit 079a699552e81127fc7ce41bcf1265b661ce632c[m
+Author: jared waters <kushdeck@gmail.com>
+Date:   Thu Nov 29 20:10:54 2012 -0800
+
+    power: fbearlysuspend: add sleep hack for CRT-off animation
+    
+    HTC panels don't seem to work correctly with the Android
+    CRT-off animation. Add a short sleep period to let userspace
+    finish drawing the animation.
+
+[33mcommit 6b0f32d549603e495aaf41b04e73708f3d0c7cab[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 29 20:53:58 2012 -0800
+
+    mmc: Kconfig: remove useless option to fix mmc submenu
+
+[33mcommit bdc44b7fa0957b895174cb23bfef360f9e7f5445[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 28 23:18:57 2012 -0800
+
+    Linux 3.0.53
+
+[33mcommit 221b5e2f1c4d3d5bcd6920e6254a91925cef98e1[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Mon Nov 26 20:34:44 2012 -0800
+
+    touchscreen: atmel: recalibrate after last finger release
+
+[33mcommit 42c6703730fdcc4ff48f15caecffb7ee44f78001[m
+Author: Shane Passmore <h8rift@gmail.com>
+Date:   Mon Nov 26 19:20:27 2012 -0600
+
+    USB: OTG: Take wakelock when VBUS present
+    
+    Enabled by default, can disable with:
+       echo N > /sys/module/otg_wakelock/parameters/enabled
+    
+    Change-Id: I34974624c52ae23490852b44c270d2f326cf6116
+    Signed-off-by: Todd Poynor <toddpoynor@google.com>
+    
+    usb: otg: Temporarily grab wakelock on charger and disconnect events
+    
+    Change-Id: If995d4af4adcb08e8369009483f2956ad9627267
+    Signed-off-by: Todd Poynor <toddpoynor@google.com>
+    
+    add for OTG support by faux123
+
+[33mcommit 59d4c22f41341ed82338118ddc523d2d7eeb5de8[m
+Author: Shane Passmore <h8rift@gmail.com>
+Date:   Mon Nov 26 18:44:23 2012 -0600
+
+    msm8660: enable USB OTG on all the things
+
+[33mcommit 56d56f55bf08dd25295bd93ae40b2df78ec30f52[m
+Author: Shane Passmore <h8rift@gmail.com>
+Date:   Sat Nov 24 17:58:33 2012 -0600
+
+    holiday: enable audience chip for all AT&T SKUs. Fixes in-call microphone for AT&T Vivid.
+
+[33mcommit 975c5f5ee810545ef0a3ff1764a6b519053d0860[m
+Author: cretin45 <cretin45@gmail.com>
+Date:   Fri Nov 23 13:02:19 2012 -0800
+
+    holiday: Increase PMEM_SF_SIZE to 32mb
+
+[33mcommit fcdb5797fd7b69086fc167993c2377feb4e58ea6[m
+Author: cretin45 <cretin45@gmail.com>
+Date:   Thu Aug 9 13:47:40 2012 -0700
+
+    ruby: Increase PMEM_SF_SIZE to 32mb
+
+[33mcommit 3641c703d16b5c9c54298f1c8f439d4c627f1767[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Fri Nov 23 00:46:51 2012 -0800
+
+    holiday: use bcmdhd.bin for firmware
+
+[33mcommit 4aa528890808ce2ac32a4d7c4d20a4ec0059767e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Fri Nov 23 00:44:19 2012 -0800
+
+    shooter: use bcmdhd for wifi
+
+[33mcommit e5741806c563069e27d9878805b13c826c119e3d[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Fri Nov 23 00:43:27 2012 -0800
+
+    shooteru: use bcmdhd for wifi
+
+[33mcommit 771e8ed7b036fa6416ee678c640f90132469c76b[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Fri Nov 23 00:29:01 2012 -0800
+
+    pyramid: use bcmdhd for wifi
+
+[33mcommit c6f7a92c1bc67955158f987cd1b3c2bc181be4e3[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 13:57:27 2012 -0700
+
+    net: wireless: fix weirdness in HTC bcm4329_248 kernel config
+
+[33mcommit c5d869446f98fe2d254b415d58f3582ba5733f1b[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 13:56:17 2012 -0700
+
+    net: wireless: remove unused bcm4330b2 directory
+
+[33mcommit 087d81055b46083ac51f86ec8b01821ff509653c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 23:11:42 2012 -0800
+
+    vidc: 1080p: fix bad declaration
+
+[33mcommit a2608cf2c5246928b672106b1a6ec791d568067a[m
+Author: Pradnya Chaphekar <pradnyac@codeaurora.org>
+Date:   Sat Feb 18 23:05:56 2012 -0800
+
+    vidc: 1080p : Add support for slice delivery mode to encoder
+    
+    Slice delivery mode enables confguring the encoder to deliver
+    one slice per output buffer. This mode is valid only for h264
+    codec when multi slice config is set to slice by mb.
+    
+    Change-Id: I1bb88a67fecf4a76ad828f4c4981ff3cad648f24
+    Signed-off-by: Pradnya Chaphekar <pradnyac@codeaurora.org>
+    
+    Conflicts:
+    	drivers/video/msm/vidc/1080p/ddl/vcd_ddl.c
+    	drivers/video/msm/vidc/1080p/ddl/vcd_ddl.h
+    	drivers/video/msm/vidc/1080p/ddl/vcd_ddl_properties.c
+    	drivers/video/msm/vidc/720p/ddl/vcd_ddl_internal_property.h
+    	drivers/video/msm/vidc/common/init/vidc_init.c
+    	drivers/video/msm/vidc/common/vcd/vcd.h
+    	include/media/msm/vcd_property.h
+
+[33mcommit 0ee5d2258ba9fcdead4aebf8c36f845654493588[m
+Author: Arun Menon <menon@codeaurora.org>
+Date:   Thu Mar 1 10:51:06 2012 -0800
+
+    msm: vidc: Extract PAR info for MPEG4/DIVX.
+    
+    Display needs the pixel aspect ratio information
+    from the video decoder to display the picture
+    with the right aspect ratio. Video decoder extracts
+    the pixel aspect ratio information from the
+    video core and passes it to the client/display
+    as extradata.
+    
+    Change-Id: I4db2b8ba827af67bc01888d13c36c1b501934ccd
+    Signed-off-by: Arun Menon <menon@codeaurora.org>
+    
+    Conflicts:
+    	drivers/video/msm/vidc/1080p/ddl/vcd_ddl_shared_mem.c
+    	drivers/video/msm/vidc/1080p/ddl/vcd_ddl_shared_mem.h
+    	drivers/video/msm/vidc/common/dec/vdec.c
+    	include/media/msm/vcd_api.h
+
+[33mcommit c6876fd9ec32ed17eb3cc419bb1c838ffc699a52[m
+Author: Mayank Chopra <makchopra@codeaurora.org>
+Date:   Wed Apr 11 10:41:13 2012 +0530
+
+    msm_fb: display: Fix color swap issues in MDP4 and Rotator drivers
+    
+    Many of MDP input formats don't have correct unpack pattern, so image
+    displayed on screen is not in the actual format set. Also,Some rotator
+    output formats differ from input, these mappings used to be handled in
+    userspace, but to avoid issues this is now done in driver. For YCrCb planar
+    inputs chrominance order is dependent on rotator hardware version. Add
+    hardware check to swap Cb and Cr for 7x30 and 8x60 rotators.
+    
+    CRs-fixed: 339114
+    CRs-fixed: 337040
+    Change-Id: I55691aa7c9d38e83e4fc63a162ffb23959ba30c1
+    Signed-off-by: Mayank Chopra <makchopra@codeaurora.org>
+    
+    Conflicts:
+    	drivers/char/msm_rotator.c
+    	drivers/video/msm/mdp4_overlay.c
+
+[33mcommit 19b25fd09b79c4ac307c6a3fa5eb18b33cd2da27[m
+Author: Ajay Singh Parmar <aparmar@codeaurora.org>
+Date:   Tue Feb 21 12:56:04 2012 +0530
+
+    msm_fb: display: Use FIR (QSEED) for upscaling.
+    
+    Low resolution UI is observed on HDTV connected with HDMI.
+    FIR (QSEED) algorithm needs to be used instead of pixel
+    repetition to improve the performance in case the BYPASS
+    composition is not used.
+    
+    CRs-fixed: 332123
+    Change-Id: Ib4c2b107b4ae1300458cccc7e8066d31aee50a0d
+    Signed-off-by: Ajay Singh Parmar <aparmar@codeaurora.org>
+    
+    Conflicts:
+    	drivers/video/msm/mdp4_overlay.c
+
+[33mcommit dbcd497e021b2454ca1577e82a99cb02ff69e8d0[m
+Author: kuogee hsieh <khsieh@codeaurora.org>
+Date:   Thu Jul 21 15:06:59 2011 -0700
+
+    msm_fb: display: add ioctl for mixer info
+    
+    Add new ioctl to allow user to query mdp mixer detail configuration.
+    
+    Signed-off-by: Kuogee Hsieh <khsieh@codeaurora.org>
+    
+    Conflicts:
+    	drivers/video/msm/mdp4_overlay.c
+    	include/linux/msm_mdp.h
+
+[33mcommit 042667650e6e5bc0b7741bef7157085df1bcfad2[m
+Author: Adrian Salido-Moreno <adrianm@codeaurora.org>
+Date:   Tue Jan 3 18:46:25 2012 -0800
+
+    msm: rotator: Fix rotator YCrCb planar formats unexpected output
+    
+    Rotator expects planar input in YCbCr order, wrong color can be seen
+    on ouput image when given YCrCb because the chromninance planes picked
+    are not correct. Swap Cb and Cr plane addresses to output correct image.
+    
+    Change-Id: Ia05ab704d18da4aac49e63fb805c40a95ea51a33
+    CRs-Fixed: 327956
+    Signed-off-by: Adrian Salido-Moreno <adrianm@codeaurora.org>
+
+[33mcommit 5bbabafc43c938d3fb98ff1521c02fd9e49e8b7b[m
+Author: Adrian Salido-Moreno <adrianm@codeaurora.org>
+Date:   Fri Oct 21 19:04:18 2011 -0700
+
+    msm: rotator: add downscale support in rotator
+    
+    Rotator is capable of performing 1/2, 1/4 and 1/8 down scaling. Add
+    downscale_ratio parameter to provide support for this feature.
+    
+    CRs-Fixed: 315874
+    Change-Id: I57dc3456ccc9bec2a125750b3e9909ffcbaf45f6
+    Signed-off-by: Adrian Salido-Moreno <adrianm@codeaurora.org>
+
+[33mcommit 932cfb82a152f3b1997865656c87eade1218a4b6[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 23:22:14 2012 -0800
+
+    bcm4329_248: ignore array bounds warning
+
+[33mcommit 661b68f9b5b630f4edf8f2163cf3099ea1186ac9[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 23:11:23 2012 -0800
+
+    restart: un-inline soc_restart
+
+[33mcommit 2444c80d6f46c7c30c1d1bfa586e0d00a1d3273b[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 22:53:22 2012 -0800
+
+    msm: audio: add audio mvs header
+
+[33mcommit 56160a0fe30741398a5e927b8856b9a86510f574[m
+Author: Vinod Koul <vinod.koul@linux.intel.com>
+Date:   Fri Dec 23 10:36:37 2011 +0530
+
+    ALSA: core: add compress parameter definations
+    
+    The patch adds the various definations used to define the encoder
+    and decoder parameters
+    
+    Signed-off-by: Vinod Koul <vinod.koul@linux.intel.com>
+    Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+    Reviewed-by: Mark Brown <broonie@opensource.wolfsonmicro.com>
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+[33mcommit 49457d8287798ccd0699165ad2af5c2a0eceff11[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:32:41 2012 -0800
+
+    Linux 3.0.52
+
+[33mcommit b95dfdc9fd2371c1b475c6aed3fd6eb6c9df4e89[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:32:32 2012 -0800
+
+    Linux 3.0.51
+
+[33mcommit 501e7181c7c900d666963810ca01f103efb01326[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:32:16 2012 -0800
+
+    Linux 3.0.50
+
+[33mcommit 9135876f8230bce63960901fc6df4662b1a82f47[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:29:11 2012 -0800
+
+    Linux 3.0.49
+
+[33mcommit 9873b6ed92bce2d44f57946bcdf77f1c9e236447[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:28:55 2012 -0800
+
+    Linux 3.0.48
+
+[33mcommit 2241bebeda15be75a4ea4009de2eef83b0dd4cb4[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:28:34 2012 -0800
+
+    Linux 3.0.47
+
+[33mcommit 7b7e1bcedf9fe1747e5a678b3a88db897c2384d1[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:16:35 2012 -0800
+
+    Linux 3.0.46
+
+[33mcommit eb0a7332635a4b6fde4bfc56ade0a3baf9abb92c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:15:43 2012 -0800
+
+    Linux 3.0.45
+
+[33mcommit d81cb52e4550254b5b93c7794e085cb11656aaf8[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 21:10:05 2012 -0800
+
+    Linux 3.0.44
+
+[33mcommit b7a44053983ac84c200d4562cc0ec5050e8d7f05[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 20:55:04 2012 -0800
+
+    Linux 3.0.43
+
+[33mcommit 2fe248f2e42d6a29e7add6c8d8af47100c44adcf[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 19:46:37 2012 -0700
+
+    Linux 3.0.42
+
+[33mcommit f557d8a82db1da33ecc7e7e9f14869148fa9c068[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 19:45:42 2012 -0700
+
+    Linux 3.0.41
+
+[33mcommit 30e1b1a399fe0f9ba2b187039b12c0139b00fe69[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 19:38:03 2012 -0700
+
+    Linux 3.0.40
+
+[33mcommit 8602f3ae77ec7c41fb00cf0ccb6359ec65c7d5dc[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 19:35:14 2012 -0700
+
+    Linux 3.0.39
+
+[33mcommit 8254cf4e72c1d99511a4baa376774678570c4410[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:43:47 2012 -0700
+
+    Linux 3.0.38
+
+[33mcommit 807933662dcba6b6c712d4ea71e941f475167e18[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:41:30 2012 -0700
+
+    Linux 3.0.37
+
+[33mcommit af7a62e82e85c4a812472d90403e1165aa646ce7[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:39:19 2012 -0700
+
+    Linux 3.0.36
+
+[33mcommit 9098b07e54435a4e74869cdb22c48c729edce69e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:38:40 2012 -0700
+
+    Linux 3.0.35
+
+[33mcommit 0e44446ae67bc4267b9de400c56c0f26260c4aa2[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:38:00 2012 -0700
+
+    Linux 3.0.34
+
+[33mcommit 4f957abf6583c941d2124d2f309a44adcc5aa97b[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:36:05 2012 -0700
+
+    Linux 3.0.33
+
+[33mcommit e88ee15ceb48cc071a6c1bd2dcf31850a49bf154[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:31:31 2012 -0700
+
+    Linux 3.0.32
+
+[33mcommit c325196828986ef9b39b95fea1468246603524e4[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:29:17 2012 -0700
+
+    Linux 3.0.31
+
+[33mcommit 0dd94a0d03340117de429dcd4d9064081d842e2e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:28:24 2012 -0700
+
+    Linux 3.0.30
+
+[33mcommit 7cc9fe984818b5a16b4749ebaa32a425f0acdce8[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:25:01 2012 -0700
+
+    Linux 3.0.29
+
+[33mcommit 9cf0748d8095d49666e48c2f8a3053baacaf21de[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:24:18 2012 -0700
+
+    Linux 3.0.28
+
+[33mcommit 47ed050a728330c3ee59faf6005c1724bc8a9521[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:22:04 2012 -0700
+
+    Linux 3.0.27
+
+[33mcommit b340c3077ba54ced3a6da756d30ea916c3880789[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:19:40 2012 -0700
+
+    Linux 3.0.26
+
+[33mcommit eff41712df34425b7279e823ab40e00b5de76835[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:18:59 2012 -0700
+
+    Linux 3.0.25
+
+[33mcommit ce7f38ad8a9b62dd53d981659cc79fca6bf5464d[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:13:11 2012 -0700
+
+    Linux 3.0.24
+
+[33mcommit af431238ebe19c59c00137dbeffd55a7958af180[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:11:21 2012 -0700
+
+    Linux 3.0.23
+
+[33mcommit f6a22848905975b9d3bbbbcc29b6eacd00c75000[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:09:20 2012 -0700
+
+    Linux 3.0.22
+
+[33mcommit 060b5d8ef7a96952024ab0ee9e06b9e5ca1527f0[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 18:06:59 2012 -0700
+
+    Linux 3.0.21
+
+[33mcommit c9a395c0a3bae7fca9e4ba8a0a4dc34e349d2b8c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 17:40:48 2012 -0700
+
+    Linux 3.0.20
+
+[33mcommit 24b7bd9d1ca107681e9ec31d25f369327b1fa90e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 17:39:33 2012 -0700
+
+    Linux 3.0.19
+
+[33mcommit 277592216049c6cd0d5c5d6513f013263ddbbf88[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 17:38:31 2012 -0700
+
+    Linux 3.0.18
+
+[33mcommit 74e3ae4f13fca41160d2263473650563b3abdfb6[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 17:34:26 2012 -0700
+
+    Linux 3.0.17
+
+[33mcommit a7c561555e137f6d66741c0037ea0fcbb55fd39f[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 20:31:38 2012 -0800
+
+    msm: HTC 8660: update defconfigs after moving msm_8x60 code
+
+[33mcommit 6f7bcd40b373fae330f1dedca67bed6046f08abe[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 20:25:37 2012 -0800
+
+    msm_fb: display: move HTC video/msm_8x60 code to video/msm
+
+[33mcommit 2d5eba4bc3be821b172d9240af60c46bbdb97193[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 18:18:34 2012 -0800
+
+    various: move gpu/msm_adreno220 to gpu/msm
+
+[33mcommit d040683a08e3f31c8073c33a2c7569f557a98287[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:38:45 2012 -0800
+
+    msm: HTC 8660: enable use of HTC USB switch stub
+
+[33mcommit b99972b919c2ee95c814f5d8910afbf66d96de54[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Mon Mar 26 16:01:53 2012 -0700
+
+    usb: gadget: add dummy function for HTC libril_htc.so
+    
+    HTC's libhtc_ril calls into the USB gadget, provide infrastructure to
+    add dummy functions so it won't crash. Add dummy function for
+    usb_function_switch to fix libhtc_ril.so crashing on screen-off. This
+    should enable libhtc_ril.so from RUU 3.25+ to work as well.
+
+[33mcommit e55ac308bfc4ae019ccac38b943c7f249bb35760[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:32:13 2012 -0800
+
+    shooteru: build spidev, buspm-dev, kineto into kernel
+
+[33mcommit 6d76637c691ca38a5a6c06e5773019c1be61ba11[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:31:25 2012 -0800
+
+    shooter: build spidev, buspm-dev, kineto into kernel
+
+[33mcommit 98b69d3048a0904dae06f166abb59385875aab6a[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:28:21 2012 -0800
+
+    msm: HTC 8660: update defconfig for CAF Android USB gadget
+
+[33mcommit fbc4d5e8eea89e16efa73f45f1857af4c8e82e4d[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:27:29 2012 -0800
+
+    msm: HTC 8660: update board files for CAF Android USB gadget
+
+[33mcommit 60a69cd4483158d6ce4a07af3dca38d8e379fb64[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 02:07:00 2012 -0800
+
+    USB: gadget: use CAF android gadget at M8260AAABQNLZA30170
+
+[33mcommit 1fba02cfca805cf535ee2c80884a57e8164b8ac2[m
+Author: Steve Muckle <smuckle@codeaurora.org>
+Date:   Sun Sep 2 13:15:44 2012 -0700
+
+    various: compilation fixes for gcc 4.6
+    
+    These changes are required to compile successfully with gcc version 4.6.
+    
+    The -Wno-address option is applied to some files to bypass a warning
+    triggered by an rcu macro. The warning is fixed cleanly upstream, but
+    that fix is too risky to backport, so it is better to just silence it
+    this way.
+
+[33mcommit c8d247e04522114a56cecab8854fa342547811ad[m
+Author: Hemant Kumar <hemantk@codeaurora.org>
+Date:   Thu Nov 3 16:40:32 2011 -0700
+
+    usb: Add network bridge host driver for dun and rmnet
+    
+    This host driver will be used to communicate with modem devices
+    with dial up network and RMNET interfaces. This driver works as
+    a bridge to pass control and data packets between the modem and
+    peripheral usb gadget driver. Driver currently supports
+    modem devices (vendor ID 0x05c6) with PIDs 0x9001
+    
+    Change-Id: Id85b552b39d061528a1c3c90a354d73580c9b631
+    Signed-off-by: Hemant Kumar <hemantk@codeaurora.org>
+    Signed-off-by: Jack Pham <jackp@codeaurora.org>
+
+[33mcommit c862544c13ae2cb7ad77a9097171e6bac00bde93[m
+Author: Mayank Rana <mrana@codeaurora.org>
+Date:   Tue Jan 24 10:37:24 2012 +0530
+
+    msm_serial_hs: Cleanup regarding usage of clock enable/disable apis
+    
+    Currently driver uses clock apis (clock_enable()/clock_disable()) before
+    accessing any UART Core register. Hence remove all usage of clock apis
+    which is just increasing the refcount of uart clock instead of turning
+    on/off the uart lock.
+    
+    Change-Id: Idf39108e40b23eb7f17d55470247b339a7850a5f
+    Signed-off-by: Mayank Rana <mrana@codeaurora.org>
+
+[33mcommit f309c0fdbe62559291a44512e00973b4bac4136f[m
+Author: vorbeth <vorbeth@gmail.com>
+Date:   Sun Apr 15 08:43:03 2012 +0100
+
+    drivers:input:touchscreen: disabling the unlock page (credit to bradsh1)
+    
+    Signed-off-by: vorbeth <vorbeth@gmail.com>
+
+[33mcommit 19e6013d78e4b4e3d126de70e21aecc35e6148de[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Sep 2 01:32:40 2012 -0700
+
+    msm: vidc: undo weird HTC pbuffer definition
+
+[33mcommit 03147e3a9243edf1c7327f3cd6b64e0811b57c5d[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 01:12:50 2012 -0800
+
+    bcmdhd: compile fixes
+
+[33mcommit 5b9be573d643f5a5fefe1e398365aa8aa8c493ed[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 01:03:13 2012 -0800
+
+    pyramid: build spidev, buspm-dev, kineto into kernel
+
+[33mcommit 95e461333661900e8b51bc0b45a5dc106111770c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:59:26 2012 -0800
+
+    pyramid: enable BT sco, rfcomm
+
+[33mcommit c44f51a28fea6bce02fb8efcd8964a4c9500bc79[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:58:09 2012 -0800
+
+    pyramid: auto-update pyramid defconfig
+
+[33mcommit f50bbdf1bce2658cc6b0a008d49ac0bb80802ed7[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:53:54 2012 -0800
+
+    net: bluetooth: revert bluetooth to ruby 2.14.531.3_R2
+
+[33mcommit 5a0b1fd0bc3b68841be75ee18e3e7445f79e72f9[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:52:33 2012 -0800
+
+    misc: ti-st: revert ti-st to ruby 2.14.531.3_R2
+
+[33mcommit cc196d6360e0eba8e450ecd34e15b647d94fa90c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:51:44 2012 -0800
+
+    msm: HTC: fix compile for headset_misc
+
+[33mcommit eda7cbd0a150ee8facbf50637deb02ff0bc398d4[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:26:14 2012 -0800
+
+    msm_fb: display: ifdef 3D mode for shooter
+
+[33mcommit c677eea36e6401d50804ff34c8e7006f7d5cb322[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Thu Nov 22 00:21:03 2012 -0800
+
+    msm: update kernel tree from HTC shooteru release
+
+[33mcommit 33d6b8c556034d6f0eef92ff833ad1c15eb3caf2[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 21 23:58:56 2012 -0800
+
+    msm: vidc: update vidc code from EVO 3D GSM
+
+[33mcommit 29dc835a4daf62d3fe7f3c26fb24b6c7c2bc1b5c[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 21 23:46:12 2012 -0800
+
+    Initial import of HTC Shooteru 3.28.401.1
+    
+    HTC kernel package: shooteru-ics-crc-3.0.16-e733189
+
+[33mcommit 0d81506280e12a255d466a5d248e1ea8ebb607b9[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 21 23:36:11 2012 -0800
+
+    Initial import of HTC Shooter 2.89.651.2
+    
+    HTC kernel package: shooter-ics-crc-3.0.16-294f767
+
+[33mcommit d362dbfd77879a94cd25378a432335e6cb9d2d43[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 21 23:21:15 2012 -0800
+
+    holiday: auto-update holiday defconfig
+
+[33mcommit 1341f4ea430d392e8906272b8508acb8ccd1b2ba[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Wed Nov 21 20:36:31 2012 -0800
+
+    Initial import of HTC Holiday 3.26.502.56_R21
+    
+    HTC kernel package: holiday-ics-crc-3.0.16-1739124
+
+[33mcommit d411da694eb8e9a18152a148fc47552589cdfbcf[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Tue Nov 20 23:21:25 2012 -0800
+
+    ruby: build buspm_dev, BT, kineto, spidev modules into kernel
+
+[33mcommit 216872b2a9e7a7bd06caa6c2b09cb2b0004c4b7f[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Tue Nov 20 01:45:26 2012 -0800
+
+    ruby: auto-update ruby defconfig
+
+[33mcommit 41bf22d6bce1ac83bc96be01d75c034c78c01a5e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Mon Nov 19 14:41:28 2012 -0800
+
+    pyramid: fix compile for pyramid panel
+
+[33mcommit 8502bef9c5991f450f893e05ac9315fc38d3e03f[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Mon Nov 19 21:25:22 2012 -0800
+
+    Initial import of HTC Amaze 2.14.531.3_R2 kernel source
+    
+    HTC kernel package: ruby-ics-crc-3.0.16-a4fb83c-wifi
+
+[33mcommit 23f499eb9f2075651ac459ac64e2f8276a054dbb[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Mon Nov 19 00:01:54 2012 -0800
+
+    pyramid: add pyramid defconfig
+
+[33mcommit 02db736bd296c6445478e7f37c151407f5b01e56[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sun Nov 18 12:50:07 2012 -0800
+
+    Initial import of HTC Sensation 3.32.531 kernel source
+    
+    HTC kernel package: pyramid-ics-crc-3.0.16-c764bfb
+
+[33mcommit bfcbd7bd798ed6b68ce193bf6885d436151d544e[m
+Author: Ethan Chen <intervigil@gmail.com>
+Date:   Sat Nov 17 23:22:32 2012 -0800
+
+    initial empty commit
