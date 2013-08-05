@@ -282,8 +282,25 @@ static void row_add_request(struct request_queue *q,
 
 		rqueue->idle_data.last_insert_time = ktime_get();
 	}
-	if (urgent_queues[rqueue->prio] &&
-	    row_rowq_unserved(rd, rqueue->prio)) {
+	if (row_queues_def[rqueue->prio].is_urgent &&
+	    !rd->pending_urgent_rq && !rd->urgent_in_flight) {
+		/* Handle High Priority queues */
+		if (rqueue->prio < ROWQ_REG_PRIO_IDX &&
+		    rd->last_served_ioprio_class != IOPRIO_CLASS_RT &&
+		    queue_was_empty) {
+			row_log_rowq(rd, rqueue->prio,
+				"added (high prio) urgent request");
+			rq->cmd_flags |= REQ_URGENT;
+			rd->pending_urgent_rq = rq;
+		} else  if (row_rowq_unserved(rd, rqueue->prio)) {
+			/* Handle Regular priotity queues */
+			row_log_rowq(rd, rqueue->prio,
+				"added urgent request (total on queue=%d)",
+				rqueue->nr_req);
+			rq->cmd_flags |= REQ_URGENT;
+			rd->pending_urgent_rq = rq;
+		}
+	} else
 		row_log_rowq(rd, rqueue->prio,
 			     "added urgent req curr_queue = %d",
 			     rd->curr_queue);
