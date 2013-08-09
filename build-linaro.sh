@@ -39,7 +39,7 @@ cp arch/arm/boot/zImage $HOME/KERNEL/out/kernel/
 # build flashable zip
 
 cd $HOME/KERNEL/out/
-zip -9 -r $HOME/ChronicBruce-dev-$NOW-$NOWT.zip .
+zip -9 -r $HOME/CMB-$NOW-$NOWT.zip .
 echo Deleting Temp files and folders....
 rm -rf $HOME/KERNEL/
 echo Build Complete, Check your Home directory for a flashable zip
