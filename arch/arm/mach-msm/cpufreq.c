@@ -71,9 +71,6 @@ char cmdline_gov[16] = "userspace";
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND
 char cmdline_gov[16] = "ondemand";
 #endif
-#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_XONDEMAND
-char cmdline_gov[16] = "xondemand";
-#endif
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 char cmdline_gov[16] = "conservative";
 #endif
