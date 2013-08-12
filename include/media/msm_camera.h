@@ -467,4 +467,3 @@ struct msm_camera_info {
 };
 /* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
 #endif
-
