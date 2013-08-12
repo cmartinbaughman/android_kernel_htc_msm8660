@@ -11,8 +11,7 @@
  *
  * This version is originally from the One X, I am bringing it here because
  * it works better than the stock ondemand - Guillermo Gutierrez : 02/12/2013
- * 
- * Brought To CM10.1 Kernel By CMB credits for creation go to the authors
+ *
  */
 
 #include <linux/kernel.h>
